@@ -153,6 +153,7 @@ class AppSettings
     public int OverlayWidth { get; set; } = 340;
     public int OverlayHeight { get; set; } = 75;
     public bool EnableInterpolation { get; set; } = true;
+    public int StepSize { get; set; } = 10; // Step size percentage (1 - 100)
 }
 
 class AudioCrossfaderWorker
@@ -161,21 +162,19 @@ class AudioCrossfaderWorker
     private static extern short GetAsyncKeyState(int vKey);
 
     private readonly AppSettings _settings;
-    private float _position = 0.5f;
-    private float _targetPosition = 0.5f;
+    private float _targetPosition = 0.5f;       // The discrete stepped position for audio
+    private float _visualPosition = 0.5f;     // The smoothly gliding position for the visual bar
     private int _muteState = 0;
+    private int _detentClicks = 0;            // Tracks extra clicks at the 0.5 equalization detent
+    private int _detentDirection = 0;         // Tracks the travel direction entering 0.5
     private readonly MMDeviceEnumerator _deviceEnumerator;
     private VolumeOverlayForm? _overlay;
     private Thread? _workerThread;
     private bool _running = false;
 
-    private DateTime _lastCenterStepTime = DateTime.MinValue;
-    private const double CenterDetentDurationMs = 400;
-
     public AudioCrossfaderWorker(AppSettings settings)
     {
         _settings = settings;
-        _targetPosition = _position;
         _deviceEnumerator = new MMDeviceEnumerator();
     }
 
@@ -227,6 +226,13 @@ class AudioCrossfaderWorker
         {
             bool physicalInputRegistered = false;
 
+            // Reset detent state when the popup window has fully faded out
+            if (_overlay != null && _overlay.IsFadedOut)
+            {
+                _detentClicks = 0;
+                _detentDirection = 0;
+            }
+
             // Drain-loop to catch every single micro-click from high-speed encoder knobs
             int upSteps = 0;
             while ((GetAsyncKeyState(_settings.KeyUp) & 0x0001) != 0) { upSteps++; }
@@ -242,39 +248,45 @@ class AudioCrossfaderWorker
             }
             lastMuteState = currentMute;
 
+            // User step size divided by 2 for ultra-fine increment granularity
+            float stepIncrement = (Math.Clamp(_settings.StepSize, 1, 100) / 2.0f) / 100.0f;
+
             if (upSteps > 0)
             {
-                Step(0.05f * upSteps);
+                Step(stepIncrement * upSteps);
                 physicalInputRegistered = true;
             }
             if (downSteps > 0)
             {
-                Step(-0.05f * downSteps);
+                Step(-stepIncrement * downSteps);
                 physicalInputRegistered = true;
             }
 
-            // Handle smooth interpolation if enabled
+            // Handle smooth visual interpolation independently from the audio steps
             if (_settings.EnableInterpolation)
             {
-                float diff = _targetPosition - _position;
+                float diff = _targetPosition - _visualPosition;
                 if (Math.Abs(diff) > 0.0005f)
                 {
-                    _position += diff * 0.5f; // Fast, fluid interpolation factor
+                    _visualPosition += diff * 0.45f;
                 }
                 else
                 {
-                    _position = _targetPosition;
+                    _visualPosition = _targetPosition;
                 }
             }
             else
             {
-                _position = _targetPosition;
+                _visualPosition = _targetPosition;
             }
 
-            // Update UI/Overlay every frame
+            if (_visualPosition <= 0.002f) _visualPosition = 0.0f;
+            if (_visualPosition >= 0.998f) _visualPosition = 1.0f;
+
+            // Update UI/Overlay every frame using the smooth visual position
             ApplyVolumes(false, physicalInputRegistered);
 
-            // Throttle Windows Audio API session updates to prevent CPU lag
+            // Throttle Windows Audio API session updates to immediate discrete steps
             var now = DateTime.Now;
             if (physicalInputRegistered && (now - lastAudioApplyTime).TotalMilliseconds >= 15)
             {
@@ -282,34 +294,66 @@ class AudioCrossfaderWorker
                 lastAudioApplyTime = now;
             }
 
-            Thread.Sleep(2); // Ultra-responsive tight loop
+            Thread.Sleep(2);
         }
     }
 
     public void Step(float delta)
     {
-        float newTarget = _targetPosition + delta;
-
         if (Math.Abs(_targetPosition - 0.5f) < 0.001f)
         {
-            var now = DateTime.Now;
-            if ((now - _lastCenterStepTime).TotalMilliseconds > CenterDetentDurationMs)
+            bool isFromRest = (_overlay == null || _overlay.IsFadedOut);
+            int currentDeltaSign = Math.Sign(delta);
+
+            // If starting from rest OR if the user changed their mind and is reversing direction, move immediately without buffer
+            if (isFromRest || (currentDeltaSign != 0 && currentDeltaSign != _detentDirection))
             {
-                _lastCenterStepTime = now;
-                return;
+                float newTarget = _targetPosition + delta;
+                _targetPosition = Math.Clamp(newTarget, 0.0f, 1.0f);
+                _detentClicks = 0;
+                _detentDirection = currentDeltaSign;
             }
             else
             {
-                _targetPosition = Math.Clamp(newTarget, 0.0f, 1.0f);
-                _lastCenterStepTime = DateTime.MinValue;
+                // Active session detent continuing in the same direction: require 3 extra clicks before breaking past 0.5
+                _detentClicks++;
+                if (_detentClicks < 3)
+                {
+                    // Stay locked at 0.5
+                    return;
+                }
+                else
+                {
+                    // Break out after 3 clicks
+                    _detentClicks = 0;
+                    float newTarget = _targetPosition + delta;
+                    _targetPosition = Math.Clamp(newTarget, 0.0f, 1.0f);
+                    _detentDirection = currentDeltaSign;
+                }
             }
         }
         else
         {
-            if ((_targetPosition < 0.5f && newTarget > 0.5f) || (_targetPosition > 0.5f && newTarget < 0.5f))
+            float newTarget = _targetPosition + delta;
+
+            // Smart Boundary Snapping
+            float stepIncrement = (Math.Clamp(_settings.StepSize, 1, 100) / 2.0f) / 100.0f;
+            if (newTarget < stepIncrement * 0.8f)
+            {
+                newTarget = 0.0f;
+            }
+            else if (newTarget > 1.0f - (stepIncrement * 0.8f))
+            {
+                newTarget = 1.0f;
+            }
+
+            // Check if we are crossing or landing on 0.5
+            bool crossingCenter = (_targetPosition < 0.5f && newTarget >= 0.5f) || (_targetPosition > 0.5f && newTarget <= 0.5f);
+            if (crossingCenter)
             {
                 _targetPosition = 0.5f;
-                _lastCenterStepTime = DateTime.Now;
+                _detentClicks = 0;
+                _detentDirection = Math.Sign(delta);
             }
             else
             {
@@ -325,25 +369,31 @@ class AudioCrossfaderWorker
 
     private void ApplyVolumes(bool updateAudioSessions, bool forceShowPopup)
     {
-        float baseApp1Vol;
-        float baseApp2Vol;
+        // Calculate audio volumes using the discrete stepped target position
+        float audioApp1Vol;
+        float audioApp2Vol;
 
-        if (_position >= 0.5f)
+        if (_targetPosition >= 0.5f)
         {
-            baseApp1Vol = 1.0f;
-            baseApp2Vol = 1.0f - ((_position - 0.5f) * 2.0f);
+            audioApp1Vol = 1.0f;
+            audioApp2Vol = 1.0f - ((_targetPosition - 0.5f) * 2.0f);
         }
         else
         {
-            baseApp2Vol = 1.0f;
-            baseApp1Vol = _position * 2.0f;
+            audioApp2Vol = 1.0f;
+            audioApp1Vol = _targetPosition * 2.0f;
         }
 
-        baseApp1Vol = Math.Clamp(baseApp1Vol, 0.0f, 1.0f);
-        baseApp2Vol = Math.Clamp(baseApp2Vol, 0.0f, 1.0f);
+        audioApp1Vol = Math.Clamp(audioApp1Vol, 0.0f, 1.0f);
+        audioApp2Vol = Math.Clamp(audioApp2Vol, 0.0f, 1.0f);
 
-        float actualApp1Vol = baseApp1Vol;
-        float actualApp2Vol = baseApp2Vol;
+        if (audioApp1Vol <= 0.01f) audioApp1Vol = 0.0f;
+        if (audioApp1Vol >= 0.99f) audioApp1Vol = 1.0f;
+        if (audioApp2Vol <= 0.01f) audioApp2Vol = 0.0f;
+        if (audioApp2Vol >= 0.99f) audioApp2Vol = 1.0f;
+
+        float actualApp1Vol = audioApp1Vol;
+        float actualApp2Vol = audioApp2Vol;
 
         if (_muteState == 1) actualApp2Vol = 0.0f;
         else if (_muteState == 2) actualApp1Vol = 0.0f;
@@ -354,7 +404,25 @@ class AudioCrossfaderWorker
             SetApplicationVolume(_settings.Source2, actualApp2Vol);
         }
 
-        _overlay?.UpdateVolumes(baseApp1Vol, baseApp2Vol, _muteState, forceShowPopup);
+        // Calculate visual volumes using the smooth gliding visual position
+        float visualApp1Vol;
+        float visualApp2Vol;
+
+        if (_visualPosition >= 0.5f)
+        {
+            visualApp1Vol = 1.0f;
+            visualApp2Vol = 1.0f - ((_visualPosition - 0.5f) * 2.0f);
+        }
+        else
+        {
+            visualApp2Vol = 1.0f;
+            visualApp1Vol = _visualPosition * 2.0f;
+        }
+
+        visualApp1Vol = Math.Clamp(visualApp1Vol, 0.0f, 1.0f);
+        visualApp2Vol = Math.Clamp(visualApp2Vol, 0.0f, 1.0f);
+
+        _overlay?.UpdateVolumes(visualApp1Vol, visualApp2Vol, _muteState, forceShowPopup);
     }
 
     private void SetApplicationVolume(string targetApp, float volume)
@@ -402,6 +470,7 @@ class SettingsForm : Form
     private TextBox _txtKeyDown;
     private ComboBox _cmbPosition;
     private TextBox _txtPopupDuration;
+    private TextBox _txtStepSize;
     private TextBox _txtWidth;
     private TextBox _txtHeight;
     private CheckBox _chkStartup;
@@ -424,7 +493,7 @@ class SettingsForm : Form
         _currentMutedHex = settings.MutedColor;
 
         this.Text = "Audio Crossfader Settings";
-        this.Size = new Size(380, 680);
+        this.Size = new Size(380, 720);
         this.FormBorderStyle = FormBorderStyle.FixedDialog;
         this.MaximizeBox = false;
         this.MinimizeBox = false;
@@ -471,6 +540,9 @@ class SettingsForm : Form
         if (_cmbPosition.SelectedIndex == -1) _cmbPosition.SelectedIndex = 0;
         Controls.Add(_cmbPosition);
         y += 30;
+
+        AddLabel("Step Size (%, 1 - 100):", 20, ref y);
+        _txtStepSize = AddTextBox(settings.StepSize.ToString(), 20, ref y);
 
         AddLabel("Popup Duration (ms, 500 - 10000):", 20, ref y);
         _txtPopupDuration = AddTextBox(settings.PopupDurationMs.ToString(), 20, ref y);
@@ -750,6 +822,7 @@ class SettingsForm : Form
             MutedColor = _currentMutedHex,
             OverlayPosition = _cmbPosition.SelectedItem?.ToString() ?? "Bottom Center",
             PopupDurationMs = Math.Clamp(ParseInt(_txtPopupDuration.Text, 2500), 500, 10000),
+            StepSize = Math.Clamp(ParseInt(_txtStepSize.Text, 10), 1, 100),
             OverlayWidth = Math.Clamp(ParseInt(_txtWidth.Text, 340), 100, 2000),
             OverlayHeight = Math.Clamp(ParseInt(_txtHeight.Text, 75), 50, 1000),
             EnableInterpolation = _chkInterpolation.Checked
@@ -787,6 +860,8 @@ class VolumeOverlayForm : Form
     private int _displayCountdownMs = 0;
     private int _totalDurationMs = 2500;
     private bool _isFadingOut = false;
+
+    public bool IsFadedOut => this.Opacity <= 0.0;
 
     public VolumeOverlayForm(string app1, string app2, AppSettings settings)
     {
@@ -992,7 +1067,7 @@ class VolumeOverlayForm : Form
         using Brush app2BarColor = new SolidBrush((_muteState == 1) ? mutedColor : unmutedColor);
         using Brush trackBgBrush = new SolidBrush(Color.FromArgb(50, 50, 50));
 
-        // Draw track backgrounds with safe rounded rectangle dimensions
+        // Draw track backgrounds safely handling nullable paths
         using (GraphicsPath? app1TrackPath = GetSafeRoundedBarPath(centerX - barWidth, barY, barWidth, barHeight, true, false))
         {
             if (app1TrackPath != null) g.FillPath(trackBgBrush, app1TrackPath);
@@ -1002,7 +1077,7 @@ class VolumeOverlayForm : Form
             if (app2TrackPath != null) g.FillPath(trackBgBrush, app2TrackPath);
         }
 
-        // Draw volume fill bars with safe rounded rectangle dimensions
+        // Draw volume fill bars safely handling nullable paths
         int app1FillWidth = (int)(barWidth * _app1Vol);
         if (app1FillWidth > 0)
         {
