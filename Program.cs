@@ -152,6 +152,7 @@ class AppSettings
 
     public int OverlayWidth { get; set; } = 340;
     public int OverlayHeight { get; set; } = 75;
+    public bool EnableInterpolation { get; set; } = true;
 }
 
 class AudioCrossfaderWorker
@@ -161,6 +162,7 @@ class AudioCrossfaderWorker
 
     private readonly AppSettings _settings;
     private float _position = 0.5f;
+    private float _targetPosition = 0.5f;
     private int _muteState = 0;
     private readonly MMDeviceEnumerator _deviceEnumerator;
     private VolumeOverlayForm? _overlay;
@@ -173,6 +175,7 @@ class AudioCrossfaderWorker
     public AudioCrossfaderWorker(AppSettings settings)
     {
         _settings = settings;
+        _targetPosition = _position;
         _deviceEnumerator = new MMDeviceEnumerator();
     }
 
@@ -187,7 +190,7 @@ class AudioCrossfaderWorker
     public void Stop()
     {
         _running = false;
-        ResetVolumesToFull(); // Reset both apps to 100% volume on exit
+        ResetVolumesToFull();
         _overlay?.Invoke(new Action(() => _overlay.Close()));
     }
 
@@ -215,60 +218,112 @@ class AudioCrossfaderWorker
         uiThread.Start();
 
         Thread.Sleep(200);
-        ApplyVolumes();
+        ApplyVolumes(true, true);
+
+        DateTime lastAudioApplyTime = DateTime.MinValue;
+        bool lastMuteState = false;
 
         while (_running)
         {
-            if ((GetAsyncKeyState(_settings.KeyUp) & 0x0001) != 0) Step(0.05f);
-            if ((GetAsyncKeyState(_settings.KeyDown) & 0x0001) != 0) Step(-0.05f);
-            if ((GetAsyncKeyState(_settings.KeyMute) & 0x0001) != 0) CycleMuteState();
+            bool physicalInputRegistered = false;
 
-            Thread.Sleep(10);
+            // Drain-loop to catch every single micro-click from high-speed encoder knobs
+            int upSteps = 0;
+            while ((GetAsyncKeyState(_settings.KeyUp) & 0x0001) != 0) { upSteps++; }
+
+            int downSteps = 0;
+            while ((GetAsyncKeyState(_settings.KeyDown) & 0x0001) != 0) { downSteps++; }
+
+            bool currentMute = (GetAsyncKeyState(_settings.KeyMute) & 0x8000) != 0;
+            if (currentMute && !lastMuteState) 
+            { 
+                CycleMuteState(); 
+                physicalInputRegistered = true; 
+            }
+            lastMuteState = currentMute;
+
+            if (upSteps > 0)
+            {
+                Step(0.05f * upSteps);
+                physicalInputRegistered = true;
+            }
+            if (downSteps > 0)
+            {
+                Step(-0.05f * downSteps);
+                physicalInputRegistered = true;
+            }
+
+            // Handle smooth interpolation if enabled
+            if (_settings.EnableInterpolation)
+            {
+                float diff = _targetPosition - _position;
+                if (Math.Abs(diff) > 0.0005f)
+                {
+                    _position += diff * 0.5f; // Fast, fluid interpolation factor
+                }
+                else
+                {
+                    _position = _targetPosition;
+                }
+            }
+            else
+            {
+                _position = _targetPosition;
+            }
+
+            // Update UI/Overlay every frame
+            ApplyVolumes(false, physicalInputRegistered);
+
+            // Throttle Windows Audio API session updates to prevent CPU lag
+            var now = DateTime.Now;
+            if (physicalInputRegistered && (now - lastAudioApplyTime).TotalMilliseconds >= 15)
+            {
+                ApplyVolumes(true, false);
+                lastAudioApplyTime = now;
+            }
+
+            Thread.Sleep(2); // Ultra-responsive tight loop
         }
     }
 
     public void Step(float delta)
     {
-        float targetPosition = _position + delta;
+        float newTarget = _targetPosition + delta;
 
-        if (Math.Abs(_position - 0.5f) < 0.001f)
+        if (Math.Abs(_targetPosition - 0.5f) < 0.001f)
         {
             var now = DateTime.Now;
             if ((now - _lastCenterStepTime).TotalMilliseconds > CenterDetentDurationMs)
             {
                 _lastCenterStepTime = now;
-                ApplyVolumes();
                 return;
             }
             else
             {
-                _position = Math.Clamp(targetPosition, 0.0f, 1.0f);
+                _targetPosition = Math.Clamp(newTarget, 0.0f, 1.0f);
                 _lastCenterStepTime = DateTime.MinValue;
             }
         }
         else
         {
-            if ((_position < 0.5f && targetPosition > 0.5f) || (_position > 0.5f && targetPosition < 0.5f))
+            if ((_targetPosition < 0.5f && newTarget > 0.5f) || (_targetPosition > 0.5f && newTarget < 0.5f))
             {
-                _position = 0.5f;
+                _targetPosition = 0.5f;
                 _lastCenterStepTime = DateTime.Now;
             }
             else
             {
-                _position = Math.Clamp(targetPosition, 0.0f, 1.0f);
+                _targetPosition = Math.Clamp(newTarget, 0.0f, 1.0f);
             }
         }
-
-        ApplyVolumes();
     }
 
     public void CycleMuteState()
     {
         _muteState = (_muteState + 1) % 3;
-        ApplyVolumes();
     }
 
-    private void ApplyVolumes()
+    private void ApplyVolumes(bool updateAudioSessions, bool forceShowPopup)
     {
         float baseApp1Vol;
         float baseApp2Vol;
@@ -293,10 +348,13 @@ class AudioCrossfaderWorker
         if (_muteState == 1) actualApp2Vol = 0.0f;
         else if (_muteState == 2) actualApp1Vol = 0.0f;
 
-        SetApplicationVolume(_settings.Source1, actualApp1Vol);
-        SetApplicationVolume(_settings.Source2, actualApp2Vol);
+        if (updateAudioSessions)
+        {
+            SetApplicationVolume(_settings.Source1, actualApp1Vol);
+            SetApplicationVolume(_settings.Source2, actualApp2Vol);
+        }
 
-        _overlay?.UpdateVolumes(baseApp1Vol, baseApp2Vol, _muteState);
+        _overlay?.UpdateVolumes(baseApp1Vol, baseApp2Vol, _muteState, forceShowPopup);
     }
 
     private void SetApplicationVolume(string targetApp, float volume)
@@ -347,6 +405,7 @@ class SettingsForm : Form
     private TextBox _txtWidth;
     private TextBox _txtHeight;
     private CheckBox _chkStartup;
+    private CheckBox _chkInterpolation;
     private TrayApplicationContext _context;
     
     private string _currentUnmutedHex;
@@ -365,7 +424,7 @@ class SettingsForm : Form
         _currentMutedHex = settings.MutedColor;
 
         this.Text = "Audio Crossfader Settings";
-        this.Size = new Size(380, 640);
+        this.Size = new Size(380, 680);
         this.FormBorderStyle = FormBorderStyle.FixedDialog;
         this.MaximizeBox = false;
         this.MinimizeBox = false;
@@ -419,6 +478,10 @@ class SettingsForm : Form
         AddLabel("Overlay Size (Width: 100-2000, Height: 50-1000):", 20, ref y);
         _txtWidth = AddNumericRow("Width:", settings.OverlayWidth.ToString(), 20, ref y);
         _txtHeight = AddNumericRow("Height:", settings.OverlayHeight.ToString(), 20, ref y);
+
+        _chkInterpolation = new CheckBox { Text = "Smooth Volume Bar Interpolation", Checked = settings.EnableInterpolation, Left = 20, Top = y, Width = 320, ForeColor = Color.White };
+        Controls.Add(_chkInterpolation);
+        y += 30;
 
         _chkStartup = new CheckBox { Text = "Run on Windows Startup", Checked = settings.RunOnStartup, Left = 20, Top = y, Width = 320, ForeColor = Color.White };
         Controls.Add(_chkStartup);
@@ -688,7 +751,8 @@ class SettingsForm : Form
             OverlayPosition = _cmbPosition.SelectedItem?.ToString() ?? "Bottom Center",
             PopupDurationMs = Math.Clamp(ParseInt(_txtPopupDuration.Text, 2500), 500, 10000),
             OverlayWidth = Math.Clamp(ParseInt(_txtWidth.Text, 340), 100, 2000),
-            OverlayHeight = Math.Clamp(ParseInt(_txtHeight.Text, 75), 50, 1000)
+            OverlayHeight = Math.Clamp(ParseInt(_txtHeight.Text, 75), 50, 1000),
+            EnableInterpolation = _chkInterpolation.Checked
         };
 
         try
@@ -735,7 +799,7 @@ class VolumeOverlayForm : Form
         this.ShowInTaskbar = false;
         this.TopMost = true;
         this.BackColor = Color.FromArgb(30, 30, 30);
-        this.ClientSize = new Size(_settings.OverlayWidth, _settings.OverlayHeight);
+        this.ClientSize = new Size(Math.Max(100, _settings.OverlayWidth), Math.Max(50, _settings.OverlayHeight));
 
         _totalDurationMs = Math.Max(500, _settings.PopupDurationMs);
 
@@ -796,7 +860,7 @@ class VolumeOverlayForm : Form
             {
                 if (this.Opacity < 1.0)
                 {
-                    this.Opacity = Math.Min(1.0, this.Opacity + 0.12);
+                    this.Opacity = Math.Min(1.0, this.Opacity + 0.15);
                 }
 
                 if (_displayCountdownMs > 0)
@@ -810,13 +874,13 @@ class VolumeOverlayForm : Form
             }
             else
             {
-                // Smoother and slightly slower fade out rate for a more graceful transition
                 if (this.Opacity > 0.0)
                 {
-                    this.Opacity = Math.Max(0.0, this.Opacity - 0.045);
+                    this.Opacity = Math.Max(0.0, this.Opacity - 0.08);
                 }
                 else
                 {
+                    this.Opacity = 0.0;
                     _fadeTimer.Stop();
                 }
             }
@@ -828,33 +892,46 @@ class VolumeOverlayForm : Form
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
-        using (GraphicsPath path = new GraphicsPath())
-        {
-            int radius = Math.Min(16, this.Height / 2);
-            path.AddArc(0, 0, radius, radius, 180, 90);
-            path.AddArc(this.Width - radius, 0, radius, radius, 270, 90);
-            path.AddArc(this.Width - radius, this.Height - radius, radius, radius, 0, 90);
-            path.AddArc(0, this.Height - radius, radius, radius, 90, 90);
-            path.CloseFigure();
-            this.Region = new Region(path);
-        }
+        UpdateRegionPath();
     }
 
-    public void UpdateVolumes(float app1Vol, float app2Vol, int muteState)
+    private void UpdateRegionPath()
+    {
+        try
+        {
+            if (this.Width < 10 || this.Height < 10) return;
+            using (GraphicsPath path = new GraphicsPath())
+            {
+                int radius = Math.Min(16, this.Height / 2);
+                path.AddArc(0, 0, radius, radius, 180, 90);
+                path.AddArc(this.Width - radius, 0, radius, radius, 270, 90);
+                path.AddArc(this.Width - radius, this.Height - radius, radius, radius, 0, 90);
+                path.AddArc(0, this.Height - radius, radius, radius, 90, 90);
+                path.CloseFigure();
+                this.Region = new Region(path);
+            }
+        }
+        catch { }
+    }
+
+    public void UpdateVolumes(float app1Vol, float app2Vol, int muteState, bool forceShow)
     {
         _app1Vol = app1Vol;
         _app2Vol = app2Vol;
         _muteState = muteState;
-        _displayCountdownMs = _totalDurationMs;
-        _isFadingOut = false;
+        
+        if (forceShow)
+        {
+            _displayCountdownMs = _totalDurationMs;
+            _isFadingOut = false;
+        }
 
         if (!this.IsDisposed && this.IsHandleCreated)
         {
             this.Invoke(new Action(() => 
             {
                 this.Invalidate();
-                // Ensure the timer restarts if it had completely stopped at opacity 0
-                if (_fadeTimer != null && !_fadeTimer.Enabled)
+                if (forceShow && _fadeTimer != null && !_fadeTimer.Enabled)
                 {
                     _fadeTimer.Start();
                 }
@@ -865,6 +942,8 @@ class VolumeOverlayForm : Form
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
+        if (this.ClientRectangle.Width <= 10 || this.ClientRectangle.Height <= 10) return;
+
         Graphics g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
@@ -879,10 +958,10 @@ class VolumeOverlayForm : Form
         float scale = Math.Clamp((float)this.Height / 75f, 0.5f, 5.0f);
 
         int centerLineTop = (int)(10 * scale);
-        int centerLineHeight = this.Height - (centerLineTop * 2);
-        g.FillRectangle(Brushes.DimGray, centerX - 1, centerLineTop, 2, Math.Max(10, centerLineHeight));
+        int centerLineHeight = Math.Max(10, this.Height - (centerLineTop * 2));
+        g.FillRectangle(Brushes.DimGray, centerX - 1, centerLineTop, 2, centerLineHeight);
 
-        float fontSize = Math.Clamp(8.5f * scale, 6.5f, 32f);
+        float fontSize = Math.Clamp(13f * scale, 6.5f, 32f);
         using (Font font = new Font("Segoe UI", fontSize, FontStyle.Bold))
         {
             SizeF app1Size = g.MeasureString(_app1Label, font);
@@ -904,7 +983,7 @@ class VolumeOverlayForm : Form
         barHeight = Math.Clamp(barHeight, 8, 40);
 
         int barY = (int)(this.Height * 0.58f);
-        barY = Math.Clamp(barY, 10, this.Height - barHeight - 6);
+        barY = Math.Clamp(barY, 10, Math.Max(10, this.Height - barHeight - 6));
 
         Color unmutedColor = ColorTranslator.FromHtml(_settings.UnmutedColor);
         Color mutedColor = ColorTranslator.FromHtml(_settings.MutedColor);
@@ -913,32 +992,32 @@ class VolumeOverlayForm : Form
         using Brush app2BarColor = new SolidBrush((_muteState == 1) ? mutedColor : unmutedColor);
         using Brush trackBgBrush = new SolidBrush(Color.FromArgb(50, 50, 50));
 
-        // Draw track backgrounds with rounded rectangle ends
-        using (GraphicsPath app1TrackPath = GetRoundedBarPath(centerX - barWidth, barY, barWidth, barHeight, true, false))
+        // Draw track backgrounds with safe rounded rectangle dimensions
+        using (GraphicsPath? app1TrackPath = GetSafeRoundedBarPath(centerX - barWidth, barY, barWidth, barHeight, true, false))
         {
-            g.FillPath(trackBgBrush, app1TrackPath);
+            if (app1TrackPath != null) g.FillPath(trackBgBrush, app1TrackPath);
         }
-        using (GraphicsPath app2TrackPath = GetRoundedBarPath(centerX, barY, barWidth, barHeight, false, true))
+        using (GraphicsPath? app2TrackPath = GetSafeRoundedBarPath(centerX, barY, barWidth, barHeight, false, true))
         {
-            g.FillPath(trackBgBrush, app2TrackPath);
+            if (app2TrackPath != null) g.FillPath(trackBgBrush, app2TrackPath);
         }
 
-        // Draw volume fill bars with rounded rectangle ends
+        // Draw volume fill bars with safe rounded rectangle dimensions
         int app1FillWidth = (int)(barWidth * _app1Vol);
         if (app1FillWidth > 0)
         {
-            using (GraphicsPath app1FillPath = GetRoundedBarPath(centerX - app1FillWidth, barY, app1FillWidth, barHeight, true, false))
+            using (GraphicsPath? app1FillPath = GetSafeRoundedBarPath(centerX - app1FillWidth, barY, app1FillWidth, barHeight, true, false))
             {
-                g.FillPath(app1BarColor, app1FillPath);
+                if (app1FillPath != null) g.FillPath(app1BarColor, app1FillPath);
             }
         }
 
         int app2FillWidth = (int)(barWidth * _app2Vol);
         if (app2FillWidth > 0)
         {
-            using (GraphicsPath app2FillPath = GetRoundedBarPath(centerX, barY, app2FillWidth, barHeight, false, true))
+            using (GraphicsPath? app2FillPath = GetSafeRoundedBarPath(centerX, barY, app2FillWidth, barHeight, false, true))
             {
-                g.FillPath(app2BarColor, app2FillPath);
+                if (app2FillPath != null) g.FillPath(app2BarColor, app2FillPath);
             }
         }
 
@@ -946,27 +1025,31 @@ class VolumeOverlayForm : Form
         using (GraphicsPath borderPath = new GraphicsPath())
         {
             int radius = Math.Min(16, this.Height / 2);
-            Rectangle borderRect = new Rectangle(0, 0, this.Width - 1, this.Height - 1);
-            borderPath.AddArc(borderRect.X, borderRect.Y, radius, radius, 180, 90);
-            borderPath.AddArc(borderRect.Right - radius, borderRect.Y, radius, radius, 270, 90);
-            borderPath.AddArc(borderRect.Right - radius, borderRect.Bottom - radius, radius, radius, 0, 90);
-            borderPath.AddArc(borderRect.X, borderRect.Bottom - radius, radius, radius, 90, 90);
-            borderPath.CloseFigure();
-
-            using (Pen pen = new Pen(Color.FromArgb(70, 70, 70), 1))
+            Rectangle borderRect = new Rectangle(0, 0, Math.Max(1, this.Width - 1), Math.Max(1, this.Height - 1));
+            if (borderRect.Width > radius * 2 && borderRect.Height > radius * 2)
             {
-                g.DrawPath(pen, borderPath);
+                borderPath.AddArc(borderRect.X, borderRect.Y, radius, radius, 180, 90);
+                borderPath.AddArc(borderRect.Right - radius, borderRect.Y, radius, radius, 270, 90);
+                borderPath.AddArc(borderRect.Right - radius, borderRect.Bottom - radius, radius, radius, 0, 90);
+                borderPath.AddArc(borderRect.X, borderRect.Bottom - radius, radius, radius, 90, 90);
+                borderPath.CloseFigure();
+
+                using (Pen pen = new Pen(Color.FromArgb(70, 70, 70), 1))
+                {
+                    g.DrawPath(pen, borderPath);
+                }
             }
         }
     }
 
-    private GraphicsPath GetRoundedBarPath(int x, int y, int width, int height, bool roundLeft, bool roundRight)
+    private GraphicsPath? GetSafeRoundedBarPath(int x, int y, int width, int height, bool roundLeft, bool roundRight)
     {
+        if (width <= 0 || height <= 0) return null;
         GraphicsPath path = new GraphicsPath();
-        if (width <= 0) return path;
 
         int cornerRadius = Math.Min(4, height / 2);
         if (width < cornerRadius * 2) cornerRadius = width / 2;
+        if (cornerRadius < 1) cornerRadius = 1;
 
         int left = x;
         int right = x + width;
@@ -974,35 +1057,42 @@ class VolumeOverlayForm : Form
         int bottom = y + height;
         int d = cornerRadius * 2;
 
-        if (roundLeft && roundRight)
+        try
         {
-            path.AddArc(left, top, d, d, 180, 90);
-            path.AddArc(right - d, top, d, d, 270, 90);
-            path.AddArc(right - d, bottom - d, d, d, 0, 90);
-            path.AddArc(left, bottom - d, d, d, 90, 90);
+            if (roundLeft && roundRight && width >= d && height >= d)
+            {
+                path.AddArc(left, top, d, d, 180, 90);
+                path.AddArc(right - d, top, d, d, 270, 90);
+                path.AddArc(right - d, bottom - d, d, d, 0, 90);
+                path.AddArc(left, bottom - d, d, d, 90, 90);
+            }
+            else if (roundLeft && width >= d && height >= d)
+            {
+                path.AddArc(left, top, d, d, 180, 90);
+                path.AddLine(left + cornerRadius, top, right, top);
+                path.AddLine(right, top, right, bottom);
+                path.AddLine(right, bottom, left + cornerRadius, bottom);
+                path.AddArc(left, bottom - d, d, d, 90, 90);
+            }
+            else if (roundRight && width >= d && height >= d)
+            {
+                path.AddLine(left, top, right - cornerRadius, top);
+                path.AddArc(right - d, top, d, d, 270, 90);
+                path.AddArc(right - d, bottom - d, d, d, 0, 90);
+                path.AddLine(right - cornerRadius, bottom, left, bottom);
+                path.AddLine(left, bottom, left, top);
+            }
+            else
+            {
+                path.AddRectangle(new Rectangle(left, top, width, height));
+            }
+            path.CloseFigure();
+            return path;
         }
-        else if (roundLeft)
+        catch
         {
-            path.AddArc(left, top, d, d, 180, 90);
-            path.AddLine(left + cornerRadius, top, right, top);
-            path.AddLine(right, top, right, bottom);
-            path.AddLine(right, bottom, left + cornerRadius, bottom);
-            path.AddArc(left, bottom - d, d, d, 90, 90);
+            path.Dispose();
+            return null;
         }
-        else if (roundRight)
-        {
-            path.AddLine(left, top, right - cornerRadius, top);
-            path.AddArc(right - d, top, d, d, 270, 90);
-            path.AddArc(right - d, bottom - d, d, d, 0, 90);
-            path.AddLine(right - cornerRadius, bottom, left, bottom);
-            path.AddLine(left, bottom, left, top);
-        }
-        else
-        {
-            path.AddRectangle(new Rectangle(left, top, width, height));
-        }
-
-        path.CloseFigure();
-        return path;
     }
 }
