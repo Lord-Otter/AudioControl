@@ -154,6 +154,7 @@ class AppSettings
     public int OverlayHeight { get; set; } = 75;
     public bool EnableInterpolation { get; set; } = true;
     public int StepSize { get; set; } = 10; // Step size percentage (1 - 100)
+    public bool EnableEqualizationBuffer { get; set; } = true; // Toggle for 100% detent buffer
 }
 
 class AudioCrossfaderWorker
@@ -300,12 +301,22 @@ class AudioCrossfaderWorker
 
     public void Step(float delta)
     {
+        // If the equalization buffer toggle is disabled, step normally without any detent resistance
+        if (!_settings.EnableEqualizationBuffer)
+        {
+            float newTarget = _targetPosition + delta;
+            float stepIncrement = (Math.Clamp(_settings.StepSize, 1, 100) / 2.0f) / 100.0f;
+            if (newTarget < stepIncrement * 0.8f) newTarget = 0.0f;
+            else if (newTarget > 1.0f - (stepIncrement * 0.8f)) newTarget = 1.0f;
+            _targetPosition = Math.Clamp(newTarget, 0.0f, 1.0f);
+            return;
+        }
+
         if (Math.Abs(_targetPosition - 0.5f) < 0.001f)
         {
             bool isFromRest = (_overlay == null || _overlay.IsFadedOut);
             int currentDeltaSign = Math.Sign(delta);
 
-            // If starting from rest OR if the user changed their mind and is reversing direction, move immediately without buffer
             if (isFromRest || (currentDeltaSign != 0 && currentDeltaSign != _detentDirection))
             {
                 float newTarget = _targetPosition + delta;
@@ -315,16 +326,13 @@ class AudioCrossfaderWorker
             }
             else
             {
-                // Active session detent continuing in the same direction: require 3 extra clicks before breaking past 0.5
                 _detentClicks++;
                 if (_detentClicks < 3)
                 {
-                    // Stay locked at 0.5
                     return;
                 }
                 else
                 {
-                    // Break out after 3 clicks
                     _detentClicks = 0;
                     float newTarget = _targetPosition + delta;
                     _targetPosition = Math.Clamp(newTarget, 0.0f, 1.0f);
@@ -336,7 +344,6 @@ class AudioCrossfaderWorker
         {
             float newTarget = _targetPosition + delta;
 
-            // Smart Boundary Snapping
             float stepIncrement = (Math.Clamp(_settings.StepSize, 1, 100) / 2.0f) / 100.0f;
             if (newTarget < stepIncrement * 0.8f)
             {
@@ -347,7 +354,6 @@ class AudioCrossfaderWorker
                 newTarget = 1.0f;
             }
 
-            // Check if we are crossing or landing on 0.5
             bool crossingCenter = (_targetPosition < 0.5f && newTarget >= 0.5f) || (_targetPosition > 0.5f && newTarget <= 0.5f);
             if (crossingCenter)
             {
@@ -475,6 +481,7 @@ class SettingsForm : Form
     private TextBox _txtHeight;
     private CheckBox _chkStartup;
     private CheckBox _chkInterpolation;
+    private CheckBox _chkBuffer;
     private TrayApplicationContext _context;
     
     private string _currentUnmutedHex;
@@ -493,7 +500,7 @@ class SettingsForm : Form
         _currentMutedHex = settings.MutedColor;
 
         this.Text = "Audio Crossfader Settings";
-        this.Size = new Size(380, 720);
+        this.Size = new Size(380, 750);
         this.FormBorderStyle = FormBorderStyle.FixedDialog;
         this.MaximizeBox = false;
         this.MinimizeBox = false;
@@ -553,6 +560,10 @@ class SettingsForm : Form
 
         _chkInterpolation = new CheckBox { Text = "Smooth Volume Bar Interpolation", Checked = settings.EnableInterpolation, Left = 20, Top = y, Width = 320, ForeColor = Color.White };
         Controls.Add(_chkInterpolation);
+        y += 30;
+
+        _chkBuffer = new CheckBox { Text = "Enable 100% Equalization Buffer", Checked = settings.EnableEqualizationBuffer, Left = 20, Top = y, Width = 320, ForeColor = Color.White };
+        Controls.Add(_chkBuffer);
         y += 30;
 
         _chkStartup = new CheckBox { Text = "Run on Windows Startup", Checked = settings.RunOnStartup, Left = 20, Top = y, Width = 320, ForeColor = Color.White };
@@ -825,7 +836,8 @@ class SettingsForm : Form
             StepSize = Math.Clamp(ParseInt(_txtStepSize.Text, 10), 1, 100),
             OverlayWidth = Math.Clamp(ParseInt(_txtWidth.Text, 340), 100, 2000),
             OverlayHeight = Math.Clamp(ParseInt(_txtHeight.Text, 75), 50, 1000),
-            EnableInterpolation = _chkInterpolation.Checked
+            EnableInterpolation = _chkInterpolation.Checked,
+            EnableEqualizationBuffer = _chkBuffer.Checked
         };
 
         try
