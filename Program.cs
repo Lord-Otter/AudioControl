@@ -714,53 +714,19 @@ public class AudioCrossfaderWorker
     private const int VK_CONTROL = 0x11;
     private const int VK_MENU = 0x12;
 
-    // Guarantees 1 step per physical rotary encoder notch, plus key-repeat if held for >400ms
+    // Guarantees strictly 1 step per physical key press or knob notch, with built-in debounce
     private struct KeyPressTracker
     {
-        public bool WasDown;
-        public DateTime NextRepeatTime;
-
         public int PollSteps(int vk, bool modifiersMatch)
         {
-            if (vk == 0)
-            {
-                WasDown = false;
-                return 0;
-            }
+            if (vk == 0 || !modifiersMatch) return 0;
 
-            short state = GetAsyncKeyState(vk);
-            bool isDown = (state & 0x8000) != 0;
-            bool wasPressedSinceLast = (state & 0x0001) != 0;
-
-            if (!modifiersMatch)
+            int steps = 0;
+            while ((GetAsyncKeyState(vk) & 0x0001) != 0)
             {
-                WasDown = isDown;
-                return 0;
+                steps++;
             }
-
-            var now = DateTime.UtcNow;
-
-            if (isDown)
-            {
-                if (!WasDown)
-                {
-                    WasDown = true;
-                    NextRepeatTime = now.AddMilliseconds(400);
-                    return 1;
-                }
-                else if (now >= NextRepeatTime)
-                {
-                    NextRepeatTime = now.AddMilliseconds(55);
-                    return 1;
-                }
-                return 0;
-            }
-            else
-            {
-                bool missedMicroPulse = !WasDown && wasPressedSinceLast;
-                WasDown = false;
-                return missedMicroPulse ? 1 : 0;
-            }
+            return steps;
         }
     }
 
