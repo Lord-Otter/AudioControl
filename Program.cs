@@ -98,7 +98,6 @@ public static class AppIconCache
     {
         if (string.IsNullOrWhiteSpace(sourceIdentifier)) return null;
 
-        // Always use the dedicated Group icon for any group
         if (sourceIdentifier.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase))
         {
             return GetDefaultGroupBitmap();
@@ -209,7 +208,6 @@ public static class AppIconCache
         using Graphics g = Graphics.FromImage(bmp);
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
-        // Rounded purple Windows 11 badge background
         using (GraphicsPath badgePath = new GraphicsPath())
         {
             int r = 10;
@@ -227,7 +225,6 @@ public static class AppIconCache
             g.FillPath(bg, badgePath);
         }
 
-        // Draw two overlapping mini app tiles inside the badge to represent a Group
         using (SolidBrush backCardBrush = new SolidBrush(Color.FromArgb(170, 255, 255, 255)))
         {
             g.FillRectangle(backCardBrush, 12, 7, 12, 10);
@@ -594,7 +591,9 @@ public class AudioSessionCache : IDisposable
     private readonly Dictionary<string, List<SimpleAudioVolume>> _sessionsByProcKey = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<uint, string> _pidToProcKey = new();
     private readonly List<MMDevice> _activeDevices = new();
+    private readonly List<AudioSessionControl> _activeSessions = new();
     private DateTime _lastRefreshTime = DateTime.MinValue;
+    private DateTime _lastMissingKeyProbeTime = DateTime.MinValue;
     private const double RefreshIntervalMs = 2000.0;
 
     public void SetVolumeForProcessKey(string procKey, float volume)
@@ -602,8 +601,12 @@ public class AudioSessionCache : IDisposable
         if (string.IsNullOrEmpty(procKey)) return;
 
         var now = DateTime.UtcNow;
-        if ((now - _lastRefreshTime).TotalMilliseconds >= RefreshIntervalMs)
+        bool regularRefreshDue = (now - _lastRefreshTime).TotalMilliseconds >= RefreshIntervalMs;
+        bool missingKeyProbeDue = !_sessionsByProcKey.ContainsKey(procKey) && (now - _lastMissingKeyProbeTime).TotalMilliseconds >= 350.0;
+
+        if (regularRefreshDue || missingKeyProbeDue)
         {
+            _lastMissingKeyProbeTime = now;
             RefreshSessions();
         }
 
@@ -625,6 +628,13 @@ public class AudioSessionCache : IDisposable
             if (faulted)
             {
                 RefreshSessions();
+                if (_sessionsByProcKey.TryGetValue(procKey, out var retryVolumes))
+                {
+                    for (int i = 0; i < retryVolumes.Count; i++)
+                    {
+                        try { retryVolumes[i].Volume = volume; } catch { }
+                    }
+                }
             }
         }
     }
@@ -635,6 +645,8 @@ public class AudioSessionCache : IDisposable
     {
         _lastRefreshTime = DateTime.UtcNow;
         _sessionsByProcKey.Clear();
+        _pidToProcKey.Clear();
+        _activeSessions.Clear();
 
         foreach (var oldDev in _activeDevices)
         {
@@ -681,21 +693,18 @@ public class AudioSessionCache : IDisposable
                             list = new List<SimpleAudioVolume>();
                             _sessionsByProcKey[procKey] = list;
                         }
+                        _activeSessions.Add(session);
                         list.Add(session.SimpleAudioVolume);
                     }
                 }
             }
         }
         catch { }
-
-        if (_pidToProcKey.Count > 500)
-        {
-            _pidToProcKey.Clear();
-        }
     }
 
     public void Dispose()
     {
+        _activeSessions.Clear();
         foreach (var dev in _activeDevices)
         {
             try { dev.Dispose(); } catch { }
@@ -714,7 +723,7 @@ public class AudioCrossfaderWorker
     private const int VK_CONTROL = 0x11;
     private const int VK_MENU = 0x12;
 
-    // Guarantees strictly 1 step per physical key press or knob notch, with built-in debounce
+    // Guarantees 1 step per physical key press or rotary encoder notch
     private struct KeyPressTracker
     {
         public int PollSteps(int vk, bool modifiersMatch)
@@ -757,8 +766,9 @@ public class AudioCrossfaderWorker
 
     private VolumeOverlayForm? _overlay;
     private Thread? _workerThread;
-    private volatile bool _running = false;
+    private CancellationTokenSource? _cts;
     private readonly object _stateLock = new();
+    private volatile bool _forceResetAudioFlag = false;
 
     public AudioCrossfaderWorker(AppSettings settings, Action<AppSettings>? onRuntimeSettingsMutated = null)
     {
@@ -805,15 +815,30 @@ public class AudioCrossfaderWorker
 
     public void Start()
     {
-        _running = true;
-        _workerThread = new Thread(RunLoop);
+        Stop();
+
+        _cts = new CancellationTokenSource();
+        CancellationToken token = _cts.Token;
+
+        _workerThread = new Thread(() => RunLoop(token));
         _workerThread.SetApartmentState(ApartmentState.STA);
+        _workerThread.IsBackground = true;
         _workerThread.Start();
     }
 
     public void Stop()
     {
-        _running = false;
+        if (_cts != null)
+        {
+            try { _cts.Cancel(); } catch { }
+        }
+
+        if (_workerThread != null && _workerThread.IsAlive)
+        {
+            try { _workerThread.Join(1500); } catch { }
+        }
+        _workerThread = null;
+
         try
         {
             if (_overlay != null && !_overlay.IsDisposed && _overlay.IsHandleCreated)
@@ -822,24 +847,36 @@ public class AudioCrossfaderWorker
             }
         }
         catch { }
+        _overlay = null;
+
+        if (_cts != null)
+        {
+            try { _cts.Dispose(); } catch { }
+            _cts = null;
+        }
     }
 
     public void UpdateSettings(AppSettings newSettings, bool resetVolumes)
     {
+        // 1. Stop and wait for the old worker thread to finish cleanup on old sources first
+        Stop();
+
+        // 2. Apply new settings and reset mute state so the mute cycle always starts cleanly
         lock (_stateLock)
         {
             _settings = newSettings.Clone();
             AppIconCache.LoadPathsFromSettings(_settings);
             RebuildVolumeChannels();
+            _muteState = 0;
+
             if (resetVolumes)
             {
                 _targetPosition = 0.5f;
                 _visualPosition = 0.5f;
-                _muteState = 0;
             }
         }
 
-        Stop();
+        // 3. Start a single clean worker thread
         Start();
     }
 
@@ -859,8 +896,6 @@ public class AudioCrossfaderWorker
         }
         _forceResetAudioFlag = true;
     }
-
-    private volatile bool _forceResetAudioFlag = false;
 
     private static bool ModifiersMatch(int binding, bool ctrlDown, bool altDown, bool shiftDown)
     {
@@ -963,7 +998,7 @@ public class AudioCrossfaderWorker
         }
     }
 
-    private void RunLoop()
+    private void RunLoop(CancellationToken token)
     {
         using AudioSessionCache sessionCache = new AudioSessionCache();
         sessionCache.ForceRefresh();
@@ -978,6 +1013,7 @@ public class AudioCrossfaderWorker
             Application.Run(_overlay);
         });
         uiThread.SetApartmentState(ApartmentState.STA);
+        uiThread.IsBackground = true;
         uiThread.Start();
 
         Thread.Sleep(150);
@@ -987,11 +1023,12 @@ public class AudioCrossfaderWorker
         DateTime lastVisualPushTime = DateTime.MinValue;
         bool lastCrossfadeMuteDown = false;
         bool lastQuickSwapDown = false;
+        bool audioUpdatePending = false;
 
         KeyPressTracker cfUpTracker = default;
         KeyPressTracker cfDownTracker = default;
 
-        while (_running)
+        while (!token.IsCancellationRequested)
         {
             if (_forceResetAudioFlag)
             {
@@ -1001,6 +1038,7 @@ public class AudioCrossfaderWorker
             }
 
             bool physicalInputRegistered = false;
+            bool immediateAudioUpdate = false;
 
             if (_overlay != null && _overlay.IsFadedOut)
             {
@@ -1019,6 +1057,7 @@ public class AudioCrossfaderWorker
             {
                 PerformQuickSwapOrCycle(sessionCache);
                 physicalInputRegistered = true;
+                immediateAudioUpdate = true;
             }
             lastQuickSwapDown = swapDown;
 
@@ -1056,6 +1095,7 @@ public class AudioCrossfaderWorker
                             ch.IsMuted = !ch.IsMuted;
                             _activeVolChannelIndex = i;
                             physicalInputRegistered = true;
+                            immediateAudioUpdate = true;
                         }
                         ch.LastMuteDown = muteDown;
 
@@ -1112,8 +1152,15 @@ public class AudioCrossfaderWorker
                 bool currentMuteComboDown = muteVk != 0 && (GetAsyncKeyState(muteVk) & 0x8000) != 0 && muteModsOk;
                 if (currentMuteComboDown && !lastCrossfadeMuteDown)
                 {
-                    _muteState = (_muteState + 1) % 3;
+                    // Cycle order: State 1 (Source 2 Muted) -> State 2 (Source 1 Muted) -> State 0 (Unmuted)
+                    _muteState = _muteState switch
+                    {
+                        1 => 2,
+                        2 => 0,
+                        _ => 1
+                    };
                     physicalInputRegistered = true;
+                    immediateAudioUpdate = true;
                 }
                 lastCrossfadeMuteDown = currentMuteComboDown;
 
@@ -1150,19 +1197,29 @@ public class AudioCrossfaderWorker
                 if (_visualPosition >= 0.998f) _visualPosition = 1.0f;
             }
 
-            bool shouldUpdateAudio = physicalInputRegistered && (now - lastAudioApplyTime).TotalMilliseconds >= 12;
-            if (shouldUpdateAudio)
+            if (physicalInputRegistered)
             {
-                lastAudioApplyTime = now;
+                audioUpdatePending = true;
             }
 
-            if (physicalInputRegistered || (isAnimating && frameTickReady))
+            // Never drop a pending audio update; apply immediately on mute/swap or once 12ms have elapsed
+            bool shouldUpdateAudio = audioUpdatePending && (immediateAudioUpdate || (now - lastAudioApplyTime).TotalMilliseconds >= 12);
+            if (shouldUpdateAudio)
             {
-                if (frameTickReady) lastVisualPushTime = now;
+                if (immediateAudioUpdate)
+                {
+                    sessionCache.ForceRefresh();
+                }
+                lastAudioApplyTime = now;
+                audioUpdatePending = false;
+            }
+
+            if (physicalInputRegistered || shouldUpdateAudio || (isAnimating && frameTickReady))
+            {
+                if (frameTickReady || physicalInputRegistered) lastVisualPushTime = now;
                 ApplyVolumes(sessionCache, shouldUpdateAudio, physicalInputRegistered);
             }
 
-            // Poll at 2ms for instant rotary encoder responsiveness while keeping UI updates capped to 60 FPS
             Thread.Sleep(2);
         }
 
@@ -1213,7 +1270,7 @@ public class AudioCrossfaderWorker
         {
             float newTarget = _targetPosition + delta;
             bool crossingCenter = (_targetPosition < 0.5f && newTarget >= 0.5f - snapEpsilon) ||
-                                (_targetPosition > 0.5f && newTarget <= 0.5f + snapEpsilon);
+                                  (_targetPosition > 0.5f && newTarget <= 0.5f + snapEpsilon);
             if (crossingCenter)
             {
                 _targetPosition = 0.5f;

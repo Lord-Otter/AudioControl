@@ -2789,6 +2789,14 @@ public class VolumeOverlayForm : Form
         }
     }
 
+    // Snaps the visual bar cleanly to 0px at <= 1% and full barWidth at >= 98.5%
+    private static int GetSnappedFillWidth(int barWidth, float vol)
+    {
+        if (vol <= 0.01f) return 0;
+        if (vol >= 0.985f) return barWidth;
+        return Math.Clamp((int)Math.Round(barWidth * vol), 0, barWidth);
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
@@ -2836,7 +2844,8 @@ public class VolumeOverlayForm : Form
                     if (trackPath != null) g.FillPath(trackBgBrush, trackPath);
                 }
 
-                int fillWidth = (int)(barWidth * _app1Vol);
+                // Uses GetSnappedFillWidth instead of (int)(barWidth * _app1Vol)
+                int fillWidth = GetSnappedFillWidth(barWidth, _app1Vol);
                 if (fillWidth > 0)
                 {
                     using (GraphicsPath? fillPath = GetSafeRoundedBarPath(sideMargin, barY, fillWidth, barHeight, true, true))
@@ -2892,7 +2901,8 @@ public class VolumeOverlayForm : Form
                     if (app2TrackPath != null) g.FillPath(trackBgBrush, app2TrackPath);
                 }
 
-                int app1FillWidth = (int)(barWidth * _app1Vol);
+                // Uses GetSnappedFillWidth instead of (int)(barWidth * _app1Vol)
+                int app1FillWidth = GetSnappedFillWidth(barWidth, _app1Vol);
                 if (app1FillWidth > 0)
                 {
                     using (GraphicsPath? app1FillPath = GetSafeRoundedBarPath(centerX - app1FillWidth, barY, app1FillWidth, barHeight, true, false))
@@ -2901,7 +2911,8 @@ public class VolumeOverlayForm : Form
                     }
                 }
 
-                int app2FillWidth = (int)(barWidth * _app2Vol);
+                // Uses GetSnappedFillWidth instead of (int)(barWidth * _app2Vol)
+                int app2FillWidth = GetSnappedFillWidth(barWidth, _app2Vol);
                 if (app2FillWidth > 0)
                 {
                     using (GraphicsPath? app2FillPath = GetSafeRoundedBarPath(centerX, barY, app2FillWidth, barHeight, false, true))
