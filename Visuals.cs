@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Win32;
@@ -17,7 +19,7 @@ public readonly struct BadgeInfo
     }
 }
 
-// Custom Dark-Mode Renderer for System Tray ContextMenuStrip (Eliminates the white left ImageMargin column)
+// Custom Dark-Mode Renderer for System Tray ContextMenuStrip
 public class DarkContextMenuColorTable : ProfessionalColorTable
 {
     public override Color ToolStripDropDownBackground => Color.FromArgb(32, 32, 32);
@@ -82,7 +84,7 @@ public class DarkContextMenuRenderer : ToolStripProfessionalRenderer
     }
 }
 
-// Manages System Tray Quick-Actions, Favorite Groups Menu, and Background Worker
+// Manages System Tray Quick-Actions, Cycle Lists, and Background Worker
 public class TrayApplicationContext : ApplicationContext
 {
     private NotifyIcon? _trayIcon;
@@ -135,17 +137,6 @@ public class TrayApplicationContext : ApplicationContext
         StartWorker();
     }
 
-    private void StyleSubMenu(ToolStripMenuItem parentItem)
-    {
-        if (parentItem.DropDown is ToolStripDropDownMenu dd)
-        {
-            dd.Renderer = _contextMenu.Renderer;
-            dd.BackColor = Color.FromArgb(32, 32, 32);
-            dd.ForeColor = Color.FromArgb(240, 240, 240);
-            dd.ShowImageMargin = true;
-        }
-    }
-
     private void PopulateTrayMenu()
     {
         _contextMenu.Items.Clear();
@@ -170,6 +161,7 @@ public class TrayApplicationContext : ApplicationContext
             {
                 var updated = _activeSettings.Clone();
                 (updated.Source1, updated.Source2) = (updated.Source2, updated.Source1);
+                (updated.Source1Color, updated.Source2Color) = (updated.Source2Color, updated.Source1Color);
                 SaveSettings(updated);
             };
             _contextMenu.Items.Add(swapItem);
@@ -179,30 +171,30 @@ public class TrayApplicationContext : ApplicationContext
         resetItem.Click += (s, e) => ResetLiveVolumes();
         _contextMenu.Items.Add(resetItem);
 
-        var favGroups = _activeSettings.Groups
-            .Where(g => g.IsFavorite && !string.IsNullOrWhiteSpace(g.GroupName))
-            .ToList();
-
         _contextMenu.Items.Add(new ToolStripSeparator());
 
-        if (favGroups.Count > 0)
+        if (isVolMode)
         {
-            if (isVolMode)
-            {
-                var favHeader = new ToolStripMenuItem("Favorite Groups") { Enabled = false };
-                _contextMenu.Items.Add(favHeader);
+            var validEntries = _activeSettings.VolumeCycleList
+                .Where(v => !string.IsNullOrWhiteSpace(v.Source))
+                .ToList();
 
-                foreach (var fg in favGroups)
+            if (validEntries.Count > 0)
+            {
+                var header = new ToolStripMenuItem("Volume Source Cycle List") { Enabled = false };
+                _contextMenu.Items.Add(header);
+
+                foreach (var entry in validEntries)
                 {
-                    string groupTarget = $"Group: {fg.GroupName}";
-                    var item = new ToolStripMenuItem(fg.GroupName)
+                    var item = new ToolStripMenuItem(entry.Source)
                     {
-                        Checked = _activeSettings.Source1.Equals(groupTarget, StringComparison.OrdinalIgnoreCase)
+                        Checked = _activeSettings.Source1.Equals(entry.Source, StringComparison.OrdinalIgnoreCase)
                     };
                     item.Click += (s, e) =>
                     {
                         var updated = _activeSettings.Clone();
-                        updated.Source1 = groupTarget;
+                        updated.Source1 = entry.Source;
+                        updated.Source1Color = entry.ColorHex;
                         SaveSettings(updated);
                     };
                     _contextMenu.Items.Add(item);
@@ -210,50 +202,45 @@ public class TrayApplicationContext : ApplicationContext
             }
             else
             {
-                var favSub1 = new ToolStripMenuItem("Set Source 1 (Favorites)");
-                var favSub2 = new ToolStripMenuItem("Set Source 2 (Favorites)");
-                StyleSubMenu(favSub1);
-                StyleSubMenu(favSub2);
-
-                foreach (var fg in favGroups)
-                {
-                    string groupTarget = $"Group: {fg.GroupName}";
-
-                    var item1 = new ToolStripMenuItem(fg.GroupName)
-                    {
-                        Checked = _activeSettings.Source1.Equals(groupTarget, StringComparison.OrdinalIgnoreCase)
-                    };
-                    item1.Click += (s, e) =>
-                    {
-                        if (_activeSettings.Source2.Equals(groupTarget, StringComparison.OrdinalIgnoreCase)) return;
-                        var updated = _activeSettings.Clone();
-                        updated.Source1 = groupTarget;
-                        SaveSettings(updated);
-                    };
-                    favSub1.DropDownItems.Add(item1);
-
-                    var item2 = new ToolStripMenuItem(fg.GroupName)
-                    {
-                        Checked = _activeSettings.Source2.Equals(groupTarget, StringComparison.OrdinalIgnoreCase)
-                    };
-                    item2.Click += (s, e) =>
-                    {
-                        if (_activeSettings.Source1.Equals(groupTarget, StringComparison.OrdinalIgnoreCase)) return;
-                        var updated = _activeSettings.Clone();
-                        updated.Source2 = groupTarget;
-                        SaveSettings(updated);
-                    };
-                    favSub2.DropDownItems.Add(item2);
-                }
-
-                _contextMenu.Items.Add(favSub1);
-                _contextMenu.Items.Add(favSub2);
+                var emptyItem = new ToolStripMenuItem("No Volume Cycle Sources Configured") { Enabled = false };
+                _contextMenu.Items.Add(emptyItem);
             }
         }
         else
         {
-            var noFavItem = new ToolStripMenuItem("No Favorite Groups Starred") { Enabled = false };
-            _contextMenu.Items.Add(noFavItem);
+            var validPairs = _activeSettings.CrossfadeCycleList
+                .Where(p => !string.IsNullOrWhiteSpace(p.Source1) && !string.IsNullOrWhiteSpace(p.Source2))
+                .ToList();
+
+            if (validPairs.Count > 0)
+            {
+                var header = new ToolStripMenuItem("Crossfade Source Pairs") { Enabled = false };
+                _contextMenu.Items.Add(header);
+
+                foreach (var pair in validPairs)
+                {
+                    var item = new ToolStripMenuItem($"{pair.Source1}  ⇄  {pair.Source2}")
+                    {
+                        Checked = _activeSettings.Source1.Equals(pair.Source1, StringComparison.OrdinalIgnoreCase) &&
+                                  _activeSettings.Source2.Equals(pair.Source2, StringComparison.OrdinalIgnoreCase)
+                    };
+                    item.Click += (s, e) =>
+                    {
+                        var updated = _activeSettings.Clone();
+                        updated.Source1 = pair.Source1;
+                        updated.Source1Color = pair.Color1Hex;
+                        updated.Source2 = pair.Source2;
+                        updated.Source2Color = pair.Color2Hex;
+                        SaveSettings(updated);
+                    };
+                    _contextMenu.Items.Add(item);
+                }
+            }
+            else
+            {
+                var emptyItem = new ToolStripMenuItem("No Crossfade Pairs Configured") { Enabled = false };
+                _contextMenu.Items.Add(emptyItem);
+            }
         }
 
         _contextMenu.Items.Add(new ToolStripSeparator());
@@ -269,6 +256,10 @@ public class TrayApplicationContext : ApplicationContext
             {
                 string json = File.ReadAllText(_settingsPath);
                 var loaded = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+                if (loaded.CycleNextKey == 0 && loaded.QuickSwapKey != 0)
+                {
+                    loaded.CycleNextKey = loaded.QuickSwapKey;
+                }
                 loaded.RecordProgramHistory(loaded.Source1);
                 loaded.RecordProgramHistory(loaded.Source2);
                 return loaded;
@@ -283,6 +274,20 @@ public class TrayApplicationContext : ApplicationContext
         _activeSettings = newSettings.Clone();
         PersistSettingsToDisk(_activeSettings);
         _crossfaderWorker?.UpdateSettings(_activeSettings, false);
+        if (_settingsForm != null && !_settingsForm.IsDisposed)
+        {
+            _crossfaderWorker?.SetSettingsWindowOpen(true, _activeSettings);
+        }
+    }
+
+    public void TriggerOverlayPreview(AppSettings draftSettings)
+    {
+        _crossfaderWorker?.PreviewOverlay(draftSettings);
+    }
+
+    public void NotifySettingsWindowState(bool isOpen, AppSettings? draftSettings = null)
+    {
+        _crossfaderWorker?.SetSettingsWindowOpen(isOpen, draftSettings);
     }
 
     private void PersistSettingsToDisk(AppSettings settingsToSave)
@@ -315,7 +320,9 @@ public class TrayApplicationContext : ApplicationContext
         if (_settingsForm == null || _settingsForm.IsDisposed)
         {
             _settingsForm = new SettingsForm(_activeSettings.Clone(), this);
+            _settingsForm.FormClosed += (s, e) => NotifySettingsWindowState(false);
             _settingsForm.Show();
+            NotifySettingsWindowState(true, _activeSettings);
         }
         else
         {
@@ -338,88 +345,7 @@ public class TrayApplicationContext : ApplicationContext
     }
 }
 
-// Custom Geometric Vector Star Button (Centered 5-pointed star inside the button box)
-public class StarToggleButton : Control
-{
-    private bool _isFavorite;
-    private bool _isHovered;
-
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public bool IsFavorite
-    {
-        get => _isFavorite;
-        set { _isFavorite = value; Invalidate(); }
-    }
-
-    public StarToggleButton()
-    {
-        this.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        this.Size = new Size(28, 25);
-        this.Cursor = Cursors.Hand;
-    }
-
-    protected override void OnMouseEnter(EventArgs e)
-    {
-        base.OnMouseEnter(e);
-        _isHovered = true;
-        Invalidate();
-    }
-
-    protected override void OnMouseLeave(EventArgs e)
-    {
-        base.OnMouseLeave(e);
-        _isHovered = false;
-        Invalidate();
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
-
-        Color bg = _isHovered ? Color.FromArgb(64, 64, 64) : Color.FromArgb(50, 50, 50);
-        Color border = _isFavorite ? Color.FromArgb(190, 150, 40) : Color.FromArgb(72, 72, 72);
-
-        using (GraphicsPath boxPath = Win11CardPanel.CreateRoundRect(rect, 4))
-        using (SolidBrush bgBrush = new SolidBrush(bg))
-        using (Pen borderPen = new Pen(border, 1f))
-        {
-            e.Graphics.FillPath(bgBrush, boxPath);
-            e.Graphics.DrawPath(borderPen, boxPath);
-        }
-
-        float cx = Width / 2f;
-        float cy = Height / 2f + 0.5f;
-        float outerRadius = Math.Min(Width, Height) * 0.34f;
-        float innerRadius = outerRadius * 0.42f;
-
-        PointF[] pts = new PointF[10];
-        for (int i = 0; i < 10; i++)
-        {
-            double angle = -Math.PI / 2.0 + i * (Math.PI / 5.0);
-            float r = (i % 2 == 0) ? outerRadius : innerRadius;
-            pts[i] = new PointF(cx + (float)(Math.Cos(angle) * r), cy + (float)(Math.Sin(angle) * r));
-        }
-
-        using GraphicsPath starPath = new GraphicsPath();
-        starPath.AddPolygon(pts);
-
-        if (_isFavorite)
-        {
-            using SolidBrush goldBrush = new SolidBrush(Color.FromArgb(255, 202, 45));
-            using Pen goldPen = new Pen(Color.FromArgb(255, 220, 90), 1f);
-            e.Graphics.FillPath(goldBrush, starPath);
-            e.Graphics.DrawPath(goldPen, starPath);
-        }
-        else
-        {
-            using Pen outlinePen = new Pen(Color.FromArgb(155, 155, 155), 1.3f);
-            e.Graphics.DrawPath(outlinePen, starPath);
-        }
-    }
-}
-
-// Custom Dark-Mode Scrollable Container (Replaces the white Win32 scrollbar with a sleek dark pill thumb)
+// Custom Dark-Mode Scrollable Container
 public class DarkScrollPanel : Panel
 {
     private readonly Panel _content;
@@ -605,7 +531,6 @@ public class Win11CardPanel : Panel
         this.Padding = new Padding(12);
     }
 
-    // Dynamically resizes the card height to hug its lowest visible child control
     public void FitHeightToContent(int bottomPadding = 12)
     {
         int maxBottom = 0;
@@ -760,11 +685,16 @@ public class SettingsForm : Form
     private Win11CardPanel _sourcesCard = null!;
     private ModernComboBox _cmbMode = null!;
     private ModernComboBox _cmbSource1 = null!;
+    private Panel _swatchSource1 = null!;
     private ModernComboBox _cmbSource2 = null!;
+    private Panel _swatchSource2 = null!;
     private Panel _source2Container = null!;
+
     private Win11CardPanel _keysCard = null!;
-    private Win11CardPanel _multiVolCard = null!;
-    private Panel _multiVolSlotsHost = null!;
+    private Win11CardPanel _cycleListCard = null!;
+    private Label _lblCycleCardTitle = null!;
+    private Button _btnAddCycleEntry = null!;
+    private Panel _cycleSlotsHost = null!;
     private Win11CardPanel _behaviorCard = null!;
 
     private Label _lblKey1 = null!;
@@ -779,12 +709,22 @@ public class SettingsForm : Form
     private TextBox _txtKey3 = null!;
     private Button _btnRec3 = null!;
 
-    private TextBox _txtKeySwap = null!;
-    private Button _btnRecSwap = null!;
+    private Label _lblKeyCycleNext = null!;
+    private TextBox _txtKeyCycleNext = null!;
+    private Button _btnRecCycleNext = null!;
 
+    private Label _lblKeyCyclePrev = null!;
+    private TextBox _txtKeyCyclePrev = null!;
+    private Button _btnRecCyclePrev = null!;
+
+    private CheckBox _chkKeepOverlayAlwaysOn = null!;
     private ModernComboBox _cmbIdentityMode = null!;
     private ModernComboBox _cmbLevelMode = null!;
-    private CheckBox _chkShowIconsInSettings = null!;
+    private CheckBox _chkUseSourceBgColors = null!;
+    private CheckBox _chkFadeBgWithVolume = null!;
+    private ModernComboBox _cmbSingleSourceFillMode = null!;
+    private TextBox _txtCarouselNeighbors = null!;
+    private CheckBox _chkCarouselBlendColors = null!;
     private ModernComboBox _cmbPosition = null!;
     private TextBox _txtPopupDuration = null!;
     private TextBox _txtStepSize = null!;
@@ -822,7 +762,7 @@ public class SettingsForm : Form
         _detectedAudio = AudioProcessDetector.Scan();
 
         this.Text = "Audio Crossfader Settings";
-        this.Size = new Size(520, 740);
+        this.Size = new Size(520, 780);
         this.FormBorderStyle = FormBorderStyle.FixedSingle;
         this.MaximizeBox = false;
         this.MinimizeBox = true;
@@ -878,6 +818,7 @@ public class SettingsForm : Form
         this.FormClosed += (s, e) =>
         {
             if (_mouseFilter != null) Application.RemoveMessageFilter(_mouseFilter);
+            _context.NotifySettingsWindowState(false);
         };
 
         this.KeyDown += SettingsForm_KeyDown;
@@ -1043,9 +984,55 @@ public class SettingsForm : Form
         return btn;
     }
 
+    private static Color SafeParseHexColor(string hex, Color fallback)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(hex))
+                return ColorTranslator.FromHtml(hex);
+        }
+        catch { }
+        return fallback;
+    }
+
+    private Panel CreateCompactColorSwatch(int left, int top, int width, int height, string initialHex, Action<string> onColorPicked)
+    {
+        Panel swatch = new Panel
+        {
+            Left = left,
+            Top = top,
+            Width = width,
+            Height = height,
+            BackColor = SafeParseHexColor(initialHex, Color.FromArgb(27, 59, 90)),
+            Cursor = Cursors.Hand
+        };
+
+        swatch.Paint += (s, e) =>
+        {
+            using Pen borderPen = new Pen(Color.FromArgb(110, 110, 110), 1);
+            e.Graphics.DrawRectangle(borderPen, 0, 0, swatch.Width - 1, swatch.Height - 1);
+        };
+
+        swatch.Click += (s, e) =>
+        {
+            using ColorDialog dlg = new ColorDialog { FullOpen = true };
+            try { dlg.Color = swatch.BackColor; } catch { }
+            if (dlg.ShowDialog(this) == DialogResult.OK)
+            {
+                swatch.BackColor = dlg.Color;
+                string hex = ColorTranslator.ToHtml(dlg.Color);
+                onColorPicked(hex);
+                MarkDirty();
+                PushLivePreviewIfActive();
+            }
+        };
+
+        return swatch;
+    }
+
     private Bitmap? ResolveDropdownIcon(string item)
     {
-        if (!_draftSettings.ShowIconsInSettings || string.IsNullOrWhiteSpace(item))
+        if (string.IsNullOrWhiteSpace(item))
             return null;
         return AppIconCache.GetIconForSource(item, _draftSettings);
     }
@@ -1055,13 +1042,7 @@ public class SettingsForm : Form
         if (string.IsNullOrWhiteSpace(item))
             return new BadgeInfo("", Color.Transparent);
         if (item.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase))
-        {
-            string gName = item.Substring(7).Trim();
-            var grp = _draftSettings.Groups.FirstOrDefault(g => g.GroupName.Equals(gName, StringComparison.OrdinalIgnoreCase));
-            return (grp != null && grp.IsFavorite)
-                ? new BadgeInfo("★ FAV GROUP", Color.FromArgb(255, 200, 60))
-                : new BadgeInfo("GROUP", Color.FromArgb(180, 140, 255));
-        }
+            return new BadgeInfo("GROUP", Color.FromArgb(180, 140, 255));
         if (_detectedAudio.PlayingAudio.Contains(item))
             return new BadgeInfo("PLAYING AUDIO", Color.FromArgb(75, 220, 130));
         if (_detectedAudio.ActiveAudioSessions.Contains(item))
@@ -1107,17 +1088,16 @@ public class SettingsForm : Form
     {
         DarkScrollPanel page = new DarkScrollPanel { Dock = DockStyle.Fill };
 
-        // Card 1: Mode & Primary Audio Sources
+        // Card 1: Mode & Active Audio Sources
         _sourcesCard = new Win11CardPanel
         {
             Left = 18,
             Top = 4,
-            Width = 468,
-            Height = 206
+            Width = 468
         };
 
         int cy = 10;
-        AddSectionHeader(_sourcesCard, "Mode & Primary Audio Sources", 14, ref cy);
+        AddSectionHeader(_sourcesCard, "Mode & Active Audio Sources", 14, ref cy);
 
         AddSubLabel(_sourcesCard, "Operation Mode", 14, ref cy);
         _cmbMode = new ModernComboBox
@@ -1136,6 +1116,7 @@ public class SettingsForm : Form
             {
                 UpdateContextUI(true);
                 MarkDirty();
+                PushLivePreviewIfActive();
             }
         };
         _sourcesCard.Controls.Add(_cmbMode);
@@ -1143,8 +1124,18 @@ public class SettingsForm : Form
 
         List<string> options = GetAvailableSourceOptions();
 
-        AddSubLabel(_sourcesCard, "Primary Source 1 (Type, pick detected audio app, or Browse .exe)", 14, ref cy);
-        _cmbSource1 = AddSourcePickerRow(_sourcesCard, options, _draftSettings.Source1, 14, 440, ref cy);
+        AddSubLabel(_sourcesCard, "Active Source 1 (Color swatch + Group/App + Browse)", 14, ref cy);
+        var s1Row = AddColoredSourcePickerRow(
+            _sourcesCard,
+            options,
+            _draftSettings.Source1,
+            _draftSettings.Source1Color,
+            hex => _draftSettings.Source1Color = hex,
+            14,
+            440,
+            ref cy);
+        _cmbSource1 = s1Row.cmb;
+        _swatchSource1 = s1Row.swatch;
 
         _source2Container = new Panel
         {
@@ -1155,10 +1146,21 @@ public class SettingsForm : Form
             BackColor = Color.Transparent
         };
         int s2y = 0;
-        AddSubLabel(_source2Container, "Source 2 / Crossfade Target", 0, ref s2y);
-        _cmbSource2 = AddSourcePickerRow(_source2Container, options, _draftSettings.Source2, 0, 440, ref s2y);
+        AddSubLabel(_source2Container, "Active Source 2 / Crossfade Target", 0, ref s2y);
+        var s2Row = AddColoredSourcePickerRow(
+            _source2Container,
+            options,
+            _draftSettings.Source2,
+            _draftSettings.Source2Color,
+            hex => _draftSettings.Source2Color = hex,
+            0,
+            440,
+            ref s2y);
+        _cmbSource2 = s2Row.cmb;
+        _swatchSource2 = s2Row.swatch;
         _sourcesCard.Controls.Add(_source2Container);
 
+        _sourcesCard.FitHeightToContent(12);
         page.InnerControls.Add(_sourcesCard);
 
         // Card 2: Hotkeys & Key Combinations
@@ -1166,8 +1168,7 @@ public class SettingsForm : Form
         {
             Left = 18,
             Top = _sourcesCard.Bottom + 10,
-            Width = 468,
-            Height = 176
+            Width = 468
         };
 
         int ky = 10;
@@ -1188,15 +1189,25 @@ public class SettingsForm : Form
         _txtKey3 = r3.txt;
         _btnRec3 = r3.btn;
 
-        AddAlignedLabel(_keysCard, "Cycle Fav Group ★:", 14, ky);
-        var rSwap = AddKeyBindControls(_keysCard, ref ky, val => _draftSettings.QuickSwapKey = val, allowClear: true);
-        _txtKeySwap = rSwap.txt;
-        _btnRecSwap = rSwap.btn;
+        _lblKeyCycleNext = AddAlignedLabel(_keysCard, "Cycle Next Pair:", 14, ky);
+        var rNext = AddKeyBindControls(_keysCard, ref ky, val =>
+        {
+            _draftSettings.CycleNextKey = val;
+            _draftSettings.QuickSwapKey = val;
+        }, allowClear: true);
+        _txtKeyCycleNext = rNext.txt;
+        _btnRecCycleNext = rNext.btn;
 
+        _lblKeyCyclePrev = AddAlignedLabel(_keysCard, "Cycle Prev Pair:", 14, ky);
+        var rPrev = AddKeyBindControls(_keysCard, ref ky, val => _draftSettings.CyclePrevKey = val, allowClear: true);
+        _txtKeyCyclePrev = rPrev.txt;
+        _btnRecCyclePrev = rPrev.btn;
+
+        _keysCard.FitHeightToContent(12);
         page.InnerControls.Add(_keysCard);
 
-        // Card 3: Additional Multi-Source Volume Control Slots
-        _multiVolCard = new Win11CardPanel
+        // Card 3: Mode-Specific Source Cycle List
+        _cycleListCard = new Win11CardPanel
         {
             Left = 18,
             Top = _keysCard.Bottom + 10,
@@ -1204,29 +1215,47 @@ public class SettingsForm : Form
             Height = 44
         };
 
-        Label lblMultiHeader = new Label
+        _lblCycleCardTitle = new Label
         {
-            Text = "Additional Simultaneous Volume Sources",
+            Text = "Crossfade Source Pairs (Cycle List)",
             Left = 14,
             Top = 12,
-            Width = 285,
+            Width = 290,
             Height = 20,
             Font = new Font("Segoe UI Semibold", 9.75f, FontStyle.Bold),
             ForeColor = Color.FromArgb(96, 205, 255)
         };
-        _multiVolCard.Controls.Add(lblMultiHeader);
+        _cycleListCard.Controls.Add(_lblCycleCardTitle);
 
-        Button btnAddSlot = CreateModernButton("+ Add Volume Source", 312, 9, 142, 26, true);
-        btnAddSlot.Click += (s, e) =>
+        _btnAddCycleEntry = CreateModernButton("+ Add Source Pair", 312, 9, 142, 26, true);
+        _btnAddCycleEntry.Click += (s, e) =>
         {
-            _draftSettings.AdditionalVolumeSlots.Add(new VolumeControlSlot { Source = "" });
-            PopulateMultiVolumeSlotsUI();
+            bool isVolMode = (_cmbMode.SelectedItem?.ToString() == "Volume Control");
+            if (isVolMode)
+            {
+                _draftSettings.VolumeCycleList.Add(new VolumeCycleEntry
+                {
+                    Source = "",
+                    ColorHex = "#1B3B5A"
+                });
+            }
+            else
+            {
+                _draftSettings.CrossfadeCycleList.Add(new CrossfadeCyclePair
+                {
+                    Source1 = "",
+                    Color1Hex = "#1B3B5A",
+                    Source2 = "",
+                    Color2Hex = "#4A2040"
+                });
+            }
+            PopulateCycleListUI();
             ReflowGeneralPage();
             MarkDirty();
         };
-        _multiVolCard.Controls.Add(btnAddSlot);
+        _cycleListCard.Controls.Add(_btnAddCycleEntry);
 
-        _multiVolSlotsHost = new Panel
+        _cycleSlotsHost = new Panel
         {
             Left = 12,
             Top = 42,
@@ -1234,16 +1263,15 @@ public class SettingsForm : Form
             Height = 0,
             BackColor = Color.Transparent
         };
-        _multiVolCard.Controls.Add(_multiVolSlotsHost);
-        page.InnerControls.Add(_multiVolCard);
+        _cycleListCard.Controls.Add(_cycleSlotsHost);
+        page.InnerControls.Add(_cycleListCard);
 
         // Card 4: Behavior & Startup
         _behaviorCard = new Win11CardPanel
         {
             Left = 18,
-            Top = _multiVolCard.Bottom + 10,
-            Width = 468,
-            Height = 144
+            Top = _cycleListCard.Bottom + 10,
+            Width = 468
         };
 
         int by = 10;
@@ -1275,7 +1303,7 @@ public class SettingsForm : Form
 
         _chkStartup = new CheckBox
         {
-            Text = "Run automatically on Windows Startup",
+            Text = "Run on Windows Startup",
             Checked = _draftSettings.RunOnStartup,
             Left = 14,
             Top = by,
@@ -1300,150 +1328,274 @@ public class SettingsForm : Form
         _chkBuffer.CheckedChanged += (s, e) => MarkDirty();
         _behaviorCard.Controls.Add(_chkBuffer);
 
+        _behaviorCard.FitHeightToContent(12);
         page.InnerControls.Add(_behaviorCard);
         return page;
     }
 
-    private void PopulateMultiVolumeSlotsUI()
+    private static string ReadComboText(ModernComboBox cmb)
     {
-        if (_multiVolSlotsHost == null) return;
-        _multiVolSlotsHost.SuspendLayout();
-        _multiVolSlotsHost.Controls.Clear();
+        return (cmb.SelectedItem?.ToString() ?? cmb.Text ?? "").Trim();
+    }
 
+    private void PopulateCycleListUI()
+    {
+        if (_cycleSlotsHost == null) return;
+        _cycleSlotsHost.SuspendLayout();
+        _cycleSlotsHost.Controls.Clear();
+
+        bool isVolumeControl = (_cmbMode?.SelectedItem?.ToString() == "Volume Control");
         List<string> options = GetAvailableSourceOptions();
         int y = 0;
 
-        for (int i = 0; i < _draftSettings.AdditionalVolumeSlots.Count; i++)
+        if (isVolumeControl)
         {
-            var slot = _draftSettings.AdditionalVolumeSlots[i];
-            Win11CardPanel rowCard = new Win11CardPanel
+            for (int i = 0; i < _draftSettings.VolumeCycleList.Count; i++)
             {
-                Left = 0,
-                Top = y,
-                Width = 442,
-                Height = 68,
-                FillColor = Color.FromArgb(48, 48, 48),
-                BorderColor = Color.FromArgb(66, 66, 66),
-                CornerRadius = 6
-            };
+                var entry = _draftSettings.VolumeCycleList[i];
+                Win11CardPanel rowCard = new Win11CardPanel
+                {
+                    Left = 0,
+                    Top = y,
+                    Width = 442,
+                    Height = 40,
+                    FillColor = Color.FromArgb(48, 48, 48),
+                    BorderColor = Color.FromArgb(66, 66, 66),
+                    CornerRadius = 6
+                };
 
-            ModernComboBox cmb = new ModernComboBox
-            {
-                Left = 8,
-                Top = 7,
-                Width = 308,
-                DropDownStyle = ComboBoxStyle.DropDown,
-                BadgeResolver = ResolveDropdownBadge,
-                IconResolver = ResolveDropdownIcon
-            };
-            cmb.Items.AddRange(options.Cast<object>().ToArray());
-            cmb.Text = slot.Source;
-            cmb.DropDown += (s, e) =>
-            {
-                _detectedAudio = AudioProcessDetector.Scan();
-                PopulateSingleComboOptions(cmb, includeGroups: true);
-            };
-            cmb.TextChanged += (s, e) =>
-            {
-                slot.Source = cmb.Text.Trim();
-                MarkDirty();
-            };
-            rowCard.Controls.Add(cmb);
+                Panel swatch = CreateCompactColorSwatch(8, 7, 26, 24, entry.ColorHex, hex => entry.ColorHex = hex);
+                rowCard.Controls.Add(swatch);
 
-            Button btnBrowse = CreateModernButton("Browse", 322, 6, 74, 25, false);
-            btnBrowse.Click += (s, e) =>
+                ModernComboBox cmb = new ModernComboBox
+                {
+                    Left = 40,
+                    Top = 7,
+                    Width = 276,
+                    DropDownStyle = ComboBoxStyle.DropDown,
+                    BadgeResolver = ResolveDropdownBadge,
+                    IconResolver = ResolveDropdownIcon
+                };
+                cmb.Items.AddRange(options.Cast<object>().ToArray());
+                cmb.SelectedItem = entry.Source;
+                if (cmb.SelectedIndex == -1) cmb.Text = entry.Source;
+                cmb.DropDown += (s, e) =>
+                {
+                    _detectedAudio = AudioProcessDetector.Scan();
+                    PopulateSingleComboOptions(cmb, includeGroups: true);
+                };
+                cmb.SelectedIndexChanged += (s, e) =>
+                {
+                    if (_isInitializing) return;
+                    entry.Source = ReadComboText(cmb);
+                    MarkDirty();
+                };
+                cmb.TextChanged += (s, e) =>
+                {
+                    if (_isInitializing) return;
+                    entry.Source = ReadComboText(cmb);
+                    MarkDirty();
+                };
+                rowCard.Controls.Add(cmb);
+
+                Button btnBrowse = CreateModernButton("Browse", 322, 6, 74, 25, false);
+                btnBrowse.Click += (s, e) =>
+                {
+                    BrowseForExecutable(cmb);
+                    entry.Source = ReadComboText(cmb);
+                };
+                rowCard.Controls.Add(btnBrowse);
+
+                Button btnDel = CreateModernButton("✕", 400, 6, 34, 25, false);
+                btnDel.Click += (s, e) =>
+                {
+                    _draftSettings.VolumeCycleList.Remove(entry);
+                    PopulateCycleListUI();
+                    ReflowGeneralPage();
+                    MarkDirty();
+                };
+                rowCard.Controls.Add(btnDel);
+
+                _cycleSlotsHost.Controls.Add(rowCard);
+                y += 46;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < _draftSettings.CrossfadeCycleList.Count; i++)
             {
-                BrowseForExecutable(cmb);
-                slot.Source = cmb.Text.Trim();
-            };
-            rowCard.Controls.Add(btnBrowse);
+                var pair = _draftSettings.CrossfadeCycleList[i];
+                Win11CardPanel pairCard = new Win11CardPanel
+                {
+                    Left = 0,
+                    Top = y,
+                    Width = 442,
+                    Height = 72,
+                    FillColor = Color.FromArgb(48, 48, 48),
+                    BorderColor = Color.FromArgb(66, 66, 66),
+                    CornerRadius = 6
+                };
 
-            Button btnDel = CreateModernButton("✕", 400, 6, 34, 25, false);
-            btnDel.Click += (s, e) =>
-            {
-                _draftSettings.AdditionalVolumeSlots.Remove(slot);
-                PopulateMultiVolumeSlotsUI();
-                ReflowGeneralPage();
-                MarkDirty();
-            };
-            rowCard.Controls.Add(btnDel);
+                // Row 1: Left / Source 1
+                Label lblS1 = new Label
+                {
+                    Text = "L:",
+                    Left = 8,
+                    Top = 10,
+                    Width = 18,
+                    Font = new Font("Segoe UI Semibold", 8.5f, FontStyle.Bold),
+                    ForeColor = Color.FromArgb(190, 190, 190)
+                };
+                pairCard.Controls.Add(lblS1);
 
-            AddMiniSlotKeybind(rowCard, "Up:", slot.KeyUp, 8, 37, val => slot.KeyUp = val);
-            AddMiniSlotKeybind(rowCard, "Down:", slot.KeyDown, 150, 37, val => slot.KeyDown = val);
-            AddMiniSlotKeybind(rowCard, "Mute:", slot.KeyMute, 300, 37, val => slot.KeyMute = val);
+                Panel swatch1 = CreateCompactColorSwatch(28, 7, 24, 24, pair.Color1Hex, hex => pair.Color1Hex = hex);
+                pairCard.Controls.Add(swatch1);
 
-            _multiVolSlotsHost.Controls.Add(rowCard);
-            y += 74;
+                ModernComboBox cmb1 = new ModernComboBox
+                {
+                    Left = 58,
+                    Top = 7,
+                    Width = 258,
+                    DropDownStyle = ComboBoxStyle.DropDown,
+                    BadgeResolver = ResolveDropdownBadge,
+                    IconResolver = ResolveDropdownIcon
+                };
+                cmb1.Items.AddRange(options.Cast<object>().ToArray());
+                cmb1.SelectedItem = pair.Source1;
+                if (cmb1.SelectedIndex == -1) cmb1.Text = pair.Source1;
+                cmb1.DropDown += (s, e) =>
+                {
+                    _detectedAudio = AudioProcessDetector.Scan();
+                    PopulateSingleComboOptions(cmb1, includeGroups: true);
+                };
+                cmb1.SelectedIndexChanged += (s, e) =>
+                {
+                    if (_isInitializing) return;
+                    pair.Source1 = ReadComboText(cmb1);
+                    MarkDirty();
+                };
+                cmb1.TextChanged += (s, e) =>
+                {
+                    if (_isInitializing) return;
+                    pair.Source1 = ReadComboText(cmb1);
+                    MarkDirty();
+                };
+                pairCard.Controls.Add(cmb1);
+
+                Button btnBrowse1 = CreateModernButton("Browse", 322, 6, 74, 25, false);
+                btnBrowse1.Click += (s, e) =>
+                {
+                    BrowseForExecutable(cmb1);
+                    pair.Source1 = ReadComboText(cmb1);
+                };
+                pairCard.Controls.Add(btnBrowse1);
+
+                Button btnDel = CreateModernButton("✕", 400, 6, 34, 57, false);
+                btnDel.Click += (s, e) =>
+                {
+                    _draftSettings.CrossfadeCycleList.Remove(pair);
+                    PopulateCycleListUI();
+                    ReflowGeneralPage();
+                    MarkDirty();
+                };
+                pairCard.Controls.Add(btnDel);
+
+                // Row 2: Right / Source 2
+                Label lblS2 = new Label
+                {
+                    Text = "R:",
+                    Left = 8,
+                    Top = 42,
+                    Width = 18,
+                    Font = new Font("Segoe UI Semibold", 8.5f, FontStyle.Bold),
+                    ForeColor = Color.FromArgb(190, 190, 190)
+                };
+                pairCard.Controls.Add(lblS2);
+
+                Panel swatch2 = CreateCompactColorSwatch(28, 39, 24, 24, pair.Color2Hex, hex => pair.Color2Hex = hex);
+                pairCard.Controls.Add(swatch2);
+
+                ModernComboBox cmb2 = new ModernComboBox
+                {
+                    Left = 58,
+                    Top = 39,
+                    Width = 258,
+                    DropDownStyle = ComboBoxStyle.DropDown,
+                    BadgeResolver = ResolveDropdownBadge,
+                    IconResolver = ResolveDropdownIcon
+                };
+                cmb2.Items.AddRange(options.Cast<object>().ToArray());
+                cmb2.SelectedItem = pair.Source2;
+                if (cmb2.SelectedIndex == -1) cmb2.Text = pair.Source2;
+                cmb2.DropDown += (s, e) =>
+                {
+                    _detectedAudio = AudioProcessDetector.Scan();
+                    PopulateSingleComboOptions(cmb2, includeGroups: true);
+                };
+                cmb2.SelectedIndexChanged += (s, e) =>
+                {
+                    if (_isInitializing) return;
+                    pair.Source2 = ReadComboText(cmb2);
+                    MarkDirty();
+                };
+                cmb2.TextChanged += (s, e) =>
+                {
+                    if (_isInitializing) return;
+                    pair.Source2 = ReadComboText(cmb2);
+                    MarkDirty();
+                };
+                pairCard.Controls.Add(cmb2);
+
+                Button btnBrowse2 = CreateModernButton("Browse", 322, 38, 74, 25, false);
+                btnBrowse2.Click += (s, e) =>
+                {
+                    BrowseForExecutable(cmb2);
+                    pair.Source2 = ReadComboText(cmb2);
+                };
+                pairCard.Controls.Add(btnBrowse2);
+
+                _cycleSlotsHost.Controls.Add(pairCard);
+                y += 78;
+            }
         }
 
-        _multiVolSlotsHost.Height = y;
-        _multiVolSlotsHost.ResumeLayout();
+        _cycleSlotsHost.Height = y;
+        _cycleSlotsHost.ResumeLayout();
     }
 
     private void ReflowGeneralPage()
     {
-        if (_sourcesCard == null || _keysCard == null || _multiVolCard == null || _behaviorCard == null)
+        if (_sourcesCard == null || _keysCard == null || _cycleListCard == null || _behaviorCard == null)
             return;
 
         bool isVolumeControl = (_cmbMode.SelectedItem?.ToString() == "Volume Control");
 
         _source2Container.Visible = !isVolumeControl;
-        _sourcesCard.Height = isVolumeControl ? 148 : 202;
+        _sourcesCard.FitHeightToContent(12);
 
+        _keysCard.FitHeightToContent(12);
         _keysCard.Top = _sourcesCard.Bottom + 10;
 
-        if (isVolumeControl)
-        {
-            _multiVolCard.Visible = true;
-            _multiVolCard.Top = _keysCard.Bottom + 10;
-            int slotsCount = _draftSettings.AdditionalVolumeSlots.Count;
-            _multiVolCard.Height = (slotsCount == 0) ? 44 : (46 + _multiVolSlotsHost.Height);
+        _lblCycleCardTitle.Text = isVolumeControl
+            ? "Volume Sources (Cycle List)"
+            : "Crossfade Source Pairs (Cycle List)";
+        _btnAddCycleEntry.Text = isVolumeControl
+            ? "+ Add Source"
+            : "+ Add Source Pair";
 
-            _chkBuffer.Visible = false;
-            _behaviorCard.Top = _multiVolCard.Bottom + 10;
-            _behaviorCard.Height = 104;
-        }
-        else
-        {
-            _multiVolCard.Visible = false;
-            _chkBuffer.Visible = true;
-            _behaviorCard.Top = _keysCard.Bottom + 10;
-            _behaviorCard.Height = 132;
-        }
+        int itemCount = isVolumeControl
+            ? _draftSettings.VolumeCycleList.Count
+            : _draftSettings.CrossfadeCycleList.Count;
+
+        _cycleSlotsHost.Visible = (itemCount > 0);
+        _cycleListCard.Top = _keysCard.Bottom + 10;
+        _cycleListCard.Height = (itemCount == 0) ? 44 : (46 + _cycleSlotsHost.Height);
+
+        _chkBuffer.Visible = !isVolumeControl;
+        _behaviorCard.FitHeightToContent(12);
+        _behaviorCard.Top = _cycleListCard.Bottom + 10;
 
         _pageGeneral?.RecalculateScroll();
-    }
-
-    private void AddMiniSlotKeybind(Control parent, string label, int currentBinding, int left, int top, Action<int> onCommit)
-    {
-        Label lbl = new Label
-        {
-            Text = label,
-            Left = left,
-            Top = top + 4,
-            Width = 38,
-            Font = new Font("Segoe UI", 8f, FontStyle.Regular),
-            ForeColor = Color.FromArgb(200, 200, 200)
-        };
-        parent.Controls.Add(lbl);
-
-        TextBox txt = new TextBox
-        {
-            Text = KeybindHelper.FormatKeybind(currentBinding),
-            Tag = currentBinding,
-            Left = left + 38,
-            Top = top + 1,
-            Width = 94,
-            ReadOnly = true,
-            BackColor = Color.FromArgb(35, 35, 35),
-            ForeColor = Color.White,
-            BorderStyle = BorderStyle.FixedSingle,
-            Font = new Font("Segoe UI", 8f, FontStyle.Regular),
-            Cursor = Cursors.Hand,
-            TextAlign = HorizontalAlignment.Center
-        };
-        txt.Click += (s, e) => StartRecording(null, txt, onCommit);
-        parent.Controls.Add(txt);
     }
 
     private DarkScrollPanel CreateGroupsPage()
@@ -1452,22 +1604,93 @@ public class SettingsForm : Form
         return page;
     }
 
+    private static float ParseFloatFlexible(string text, float defaultVal)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return defaultVal;
+        string normalized = text.Trim().Replace(',', '.');
+        return float.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out float val) ? val : defaultVal;
+    }
+
+    private void SyncDraftPersonalizationFields()
+    {
+        if (_isInitializing) return;
+        int ParseInt(string text, int defaultVal) => int.TryParse(text, out int val) ? val : defaultVal;
+
+        _draftSettings.Source1 = ReadComboText(_cmbSource1);
+        _draftSettings.Source2 = ReadComboText(_cmbSource2);
+        _draftSettings.OverlayPosition = _cmbPosition?.SelectedItem?.ToString() ?? _draftSettings.OverlayPosition;
+        _draftSettings.PopupDurationMs = Math.Clamp(ParseInt(_txtPopupDuration?.Text ?? "2500", 2500), 500, 10000);
+        _draftSettings.OverlayWidth = Math.Clamp(ParseInt(_txtWidth?.Text ?? "360", 360), 120, 2000);
+        _draftSettings.OverlayHeight = Math.Clamp(ParseInt(_txtHeight?.Text ?? "80", 80), 50, 1000);
+        _draftSettings.EnableInterpolation = _chkInterpolation?.Checked ?? true;
+        _draftSettings.InterpolationSpeed = Math.Clamp(ParseInt(_txtInterpSpeed?.Text ?? "45", 45), 5, 100);
+        _draftSettings.CarouselVisibleNeighbors = Math.Clamp(ParseFloatFlexible(_txtCarouselNeighbors?.Text ?? "1.0", 1.0f), 0.5f, 2.5f);
+        _draftSettings.CarouselBlendColors = _chkCarouselBlendColors?.Checked ?? true;
+    }
+
+    private void PushLivePreviewIfActive(bool forceTrigger = false)
+    {
+        if (_isInitializing) return;
+        SyncDraftPersonalizationFields();
+        if (forceTrigger || _draftSettings.KeepOverlayOnWhileSettingsOpen)
+        {
+            _context.TriggerOverlayPreview(_draftSettings);
+        }
+    }
+
     private DarkScrollPanel CreatePersonalizationPage()
     {
         DarkScrollPanel page = new DarkScrollPanel { Dock = DockStyle.Fill };
         int y = 4;
 
-        // Card 1: Display Customization
+        // Card 0: Live Overlay Preview & Always-On while Settings Open
+        Win11CardPanel previewCard = new Win11CardPanel
+        {
+            Left = 18,
+            Top = y,
+            Width = 468
+        };
+
+        int py = 10;
+        AddSectionHeader(previewCard, "Live Overlay Preview", 14, ref py);
+
+        Button btnShowPreview = CreateModernButton("Show Overlay Preview", 14, py, 195, 29, true);
+        btnShowPreview.Click += (s, e) => PushLivePreviewIfActive(forceTrigger: true);
+        previewCard.Controls.Add(btnShowPreview);
+        py += 36;
+
+        _chkKeepOverlayAlwaysOn = new CheckBox
+        {
+            Text = "Keep Overlay Always Visible While Settings Window is Open",
+            Checked = _draftSettings.KeepOverlayOnWhileSettingsOpen,
+            Left = 14,
+            Top = py,
+            Width = 435,
+            Height = 22,
+            ForeColor = Color.FromArgb(230, 230, 230)
+        };
+        _chkKeepOverlayAlwaysOn.CheckedChanged += (s, e) =>
+        {
+            _draftSettings.KeepOverlayOnWhileSettingsOpen = _chkKeepOverlayAlwaysOn.Checked;
+            MarkDirty();
+            _context.NotifySettingsWindowState(true, _draftSettings);
+        };
+        previewCard.Controls.Add(_chkKeepOverlayAlwaysOn);
+
+        previewCard.FitHeightToContent(12);
+        page.InnerControls.Add(previewCard);
+        y = previewCard.Bottom + 10;
+
+        // Card 1: Display, Background Flair & Carousel Settings
         Win11CardPanel contentStyleCard = new Win11CardPanel
         {
             Left = 18,
             Top = y,
-            Width = 468,
-            Height = 152
+            Width = 468
         };
 
         int cy = 10;
-        AddSectionHeader(contentStyleCard, "Overlay & Menu Content Style", 14, ref cy);
+        AddSectionHeader(contentStyleCard, "Overlay Content, Flair & Carousel", 14, ref cy);
 
         Label lblIdMode = new Label
         {
@@ -1493,9 +1716,10 @@ public class SettingsForm : Form
         {
             _draftSettings.OverlayIdentityMode = _cmbIdentityMode.SelectedItem?.ToString() ?? "Both";
             MarkDirty();
+            PushLivePreviewIfActive();
         };
         contentStyleCard.Controls.Add(_cmbIdentityMode);
-        cy += 32;
+        cy += 30;
 
         Label lblLvlMode = new Label
         {
@@ -1521,37 +1745,138 @@ public class SettingsForm : Form
         {
             _draftSettings.OverlayLevelMode = _cmbLevelMode.SelectedItem?.ToString() ?? "Both";
             MarkDirty();
+            PushLivePreviewIfActive();
         };
         contentStyleCard.Controls.Add(_cmbLevelMode);
-        cy += 32;
+        cy += 30;
 
-        _chkShowIconsInSettings = new CheckBox
+        _chkUseSourceBgColors = new CheckBox
         {
-            Text = "Display Program Icons inside Settings Menu Dropdowns",
-            Checked = _draftSettings.ShowIconsInSettings,
+            Text = "Tint Overlay Background with Assigned Source Colors",
+            Checked = _draftSettings.UseSourceBackgroundColors,
             Left = 14,
             Top = cy + 2,
-            Width = 420,
+            Width = 440,
             Height = 22,
             ForeColor = Color.FromArgb(230, 230, 230)
         };
-        _chkShowIconsInSettings.CheckedChanged += (s, e) =>
+        _chkUseSourceBgColors.CheckedChanged += (s, e) =>
         {
-            _draftSettings.ShowIconsInSettings = _chkShowIconsInSettings.Checked;
+            _draftSettings.UseSourceBackgroundColors = _chkUseSourceBgColors.Checked;
+            if (_chkFadeBgWithVolume != null) _chkFadeBgWithVolume.Enabled = _chkUseSourceBgColors.Checked;
+            if (_cmbSingleSourceFillMode != null) _cmbSingleSourceFillMode.Enabled = _chkUseSourceBgColors.Checked;
             MarkDirty();
+            PushLivePreviewIfActive();
         };
-        contentStyleCard.Controls.Add(_chkShowIconsInSettings);
+        contentStyleCard.Controls.Add(_chkUseSourceBgColors);
+        cy += 26;
 
+        _chkFadeBgWithVolume = new CheckBox
+        {
+            Text = "Fade Background Color to Dark Grey as Volume Lowers / Mutes",
+            Checked = _draftSettings.FadeBgColorWithVolume,
+            Enabled = _draftSettings.UseSourceBackgroundColors,
+            Left = 14,
+            Top = cy + 2,
+            Width = 440,
+            Height = 22,
+            ForeColor = Color.FromArgb(230, 230, 230)
+        };
+        _chkFadeBgWithVolume.CheckedChanged += (s, e) =>
+        {
+            _draftSettings.FadeBgColorWithVolume = _chkFadeBgWithVolume.Checked;
+            MarkDirty();
+            PushLivePreviewIfActive();
+        };
+        contentStyleCard.Controls.Add(_chkFadeBgWithVolume);
+        cy += 28;
+
+        Label lblSingleFill = new Label
+        {
+            Text = "Single-Source Color Fill:",
+            Left = 14,
+            Top = cy + 3,
+            Width = 165,
+            ForeColor = Color.FromArgb(200, 200, 200)
+        };
+        contentStyleCard.Controls.Add(lblSingleFill);
+
+        _cmbSingleSourceFillMode = new ModernComboBox
+        {
+            Left = 185,
+            Top = cy,
+            Width = 265,
+            Enabled = _draftSettings.UseSourceBackgroundColors,
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        _cmbSingleSourceFillMode.Items.AddRange(new object[] { "Solid Fill", "Gradient to Dark Grey" });
+        _cmbSingleSourceFillMode.SelectedItem = _draftSettings.SingleSourceBgFillMode;
+        if (_cmbSingleSourceFillMode.SelectedIndex == -1) _cmbSingleSourceFillMode.SelectedIndex = 0;
+        _cmbSingleSourceFillMode.SelectedIndexChanged += (s, e) =>
+        {
+            _draftSettings.SingleSourceBgFillMode = _cmbSingleSourceFillMode.SelectedItem?.ToString() ?? "Solid Fill";
+            MarkDirty();
+            PushLivePreviewIfActive();
+        };
+        contentStyleCard.Controls.Add(_cmbSingleSourceFillMode);
+        cy += 32;
+
+        Label lblCarouselRange = new Label
+        {
+            Text = "Carousel Extension (0.5 - 2.5 items):",
+            Left = 14,
+            Top = cy + 3,
+            Width = 220,
+            ForeColor = Color.FromArgb(200, 200, 200)
+        };
+        contentStyleCard.Controls.Add(lblCarouselRange);
+
+        _txtCarouselNeighbors = new TextBox
+        {
+            Text = _draftSettings.CarouselVisibleNeighbors.ToString("0.0", CultureInfo.InvariantCulture),
+            Left = 240,
+            Top = cy,
+            Width = 80,
+            BackColor = Color.FromArgb(48, 48, 48),
+            ForeColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        _txtCarouselNeighbors.TextChanged += (s, e) =>
+        {
+            MarkDirty();
+            PushLivePreviewIfActive();
+        };
+        contentStyleCard.Controls.Add(_txtCarouselNeighbors);
+        cy += 28;
+
+        _chkCarouselBlendColors = new CheckBox
+        {
+            Text = "Smoothly Fade Colors Between Items in Cycle Carousel",
+            Checked = _draftSettings.CarouselBlendColors,
+            Left = 14,
+            Top = cy + 2,
+            Width = 440,
+            Height = 22,
+            ForeColor = Color.FromArgb(230, 230, 230)
+        };
+        _chkCarouselBlendColors.CheckedChanged += (s, e) =>
+        {
+            _draftSettings.CarouselBlendColors = _chkCarouselBlendColors.Checked;
+            MarkDirty();
+            PushLivePreviewIfActive();
+        };
+        contentStyleCard.Controls.Add(_chkCarouselBlendColors);
+
+        contentStyleCard.FitHeightToContent(12);
         page.InnerControls.Add(contentStyleCard);
-        y += contentStyleCard.Height + 10;
+        y = contentStyleCard.Bottom + 10;
 
         // Card 2: Overlay Colors, Position, Size & Interpolation Speed
         Win11CardPanel appearanceCard = new Win11CardPanel
         {
             Left = 18,
             Top = y,
-            Width = 468,
-            Height = 290
+            Width = 468
         };
 
         int ay = 10;
@@ -1561,12 +1886,14 @@ public class SettingsForm : Form
         {
             _draftSettings.UnmutedColor = hex;
             MarkDirty();
+            PushLivePreviewIfActive();
         }, ref ay);
 
         _mutedColorBox = AddColorPickerRow(appearanceCard, "Muted Bar Color:", _draftSettings.MutedColor, (hex) =>
         {
             _draftSettings.MutedColor = hex;
             MarkDirty();
+            PushLivePreviewIfActive();
         }, ref ay);
 
         Label lblPos = new Label
@@ -1589,9 +1916,13 @@ public class SettingsForm : Form
         _cmbPosition.Items.AddRange(new object[] { "Bottom Center", "Top Center", "Bottom Right", "Bottom Left", "Top Right", "Top Left" });
         _cmbPosition.SelectedItem = _draftSettings.OverlayPosition;
         if (_cmbPosition.SelectedIndex == -1) _cmbPosition.SelectedIndex = 0;
-        _cmbPosition.SelectedIndexChanged += (s, e) => MarkDirty();
+        _cmbPosition.SelectedIndexChanged += (s, e) =>
+        {
+            MarkDirty();
+            PushLivePreviewIfActive();
+        };
         appearanceCard.Controls.Add(_cmbPosition);
-        ay += 32;
+        ay += 30;
 
         Label lblDur = new Label
         {
@@ -1615,7 +1946,7 @@ public class SettingsForm : Form
         };
         _txtPopupDuration.TextChanged += (s, e) => MarkDirty();
         appearanceCard.Controls.Add(_txtPopupDuration);
-        ay += 30;
+        ay += 28;
 
         Label lblSize = new Label
         {
@@ -1637,7 +1968,11 @@ public class SettingsForm : Form
             ForeColor = Color.White,
             BorderStyle = BorderStyle.FixedSingle
         };
-        _txtWidth.TextChanged += (s, e) => MarkDirty();
+        _txtWidth.TextChanged += (s, e) =>
+        {
+            MarkDirty();
+            PushLivePreviewIfActive();
+        };
         appearanceCard.Controls.Add(_txtWidth);
 
         Label lblBy = new Label
@@ -1660,17 +1995,21 @@ public class SettingsForm : Form
             ForeColor = Color.White,
             BorderStyle = BorderStyle.FixedSingle
         };
-        _txtHeight.TextChanged += (s, e) => MarkDirty();
+        _txtHeight.TextChanged += (s, e) =>
+        {
+            MarkDirty();
+            PushLivePreviewIfActive();
+        };
         appearanceCard.Controls.Add(_txtHeight);
-        ay += 32;
+        ay += 30;
 
         _chkInterpolation = new CheckBox
         {
-            Text = "Overlay Bar Interpolation",
+            Text = "Overlay Bar & Color Interpolation",
             Checked = _draftSettings.EnableInterpolation,
             Left = 14,
             Top = ay + 2,
-            Width = 230,
+            Width = 222,
             Height = 22,
             ForeColor = Color.FromArgb(230, 230, 230)
         };
@@ -1678,6 +2017,7 @@ public class SettingsForm : Form
         {
             if (_txtInterpSpeed != null) _txtInterpSpeed.Enabled = _chkInterpolation.Checked;
             MarkDirty();
+            PushLivePreviewIfActive();
         };
         appearanceCard.Controls.Add(_chkInterpolation);
 
@@ -1707,19 +2047,32 @@ public class SettingsForm : Form
         _txtInterpSpeed.TextChanged += (s, e) => MarkDirty();
         appearanceCard.Controls.Add(_txtInterpSpeed);
 
+        appearanceCard.FitHeightToContent(12);
         page.InnerControls.Add(appearanceCard);
         page.RecalculateScroll();
         return page;
     }
 
-    private ModernComboBox AddSourcePickerRow(Control parent, List<string> items, string selectedValue, int left, int totalWidth, ref int top)
+    private (ModernComboBox cmb, Panel swatch) AddColoredSourcePickerRow(
+        Control parent,
+        List<string> items,
+        string selectedValue,
+        string initialColorHex,
+        Action<string> onColorChanged,
+        int left,
+        int totalWidth,
+        ref int top)
     {
+        int swatchWidth = 26;
         int browseWidth = 84;
-        int comboWidth = totalWidth - browseWidth - 6;
+        int comboWidth = totalWidth - swatchWidth - browseWidth - 12;
+
+        Panel swatch = CreateCompactColorSwatch(left, top, swatchWidth, 24, initialColorHex, onColorChanged);
+        parent.Controls.Add(swatch);
 
         ModernComboBox cmb = new ModernComboBox
         {
-            Left = left,
+            Left = left + swatchWidth + 6,
             Top = top,
             Width = comboWidth,
             DropDownStyle = ComboBoxStyle.DropDown,
@@ -1735,26 +2088,35 @@ public class SettingsForm : Form
             _detectedAudio = AudioProcessDetector.Scan();
             PopulateSingleComboOptions(cmb, includeGroups: true);
         };
-        cmb.SelectedIndexChanged += (s, e) => MarkDirty();
-        cmb.TextChanged += (s, e) => MarkDirty();
+        cmb.SelectedIndexChanged += (s, e) =>
+        {
+            MarkDirty();
+            PushLivePreviewIfActive();
+        };
+        cmb.TextChanged += (s, e) =>
+        {
+            MarkDirty();
+            PushLivePreviewIfActive();
+        };
         parent.Controls.Add(cmb);
 
-        Button btnBrowse = CreateModernButton("Browse...", left + comboWidth + 6, top - 1, browseWidth, 25, false);
+        Button btnBrowse = CreateModernButton("Browse...", cmb.Right + 6, top - 1, browseWidth, 25, false);
         btnBrowse.Click += (s, e) => BrowseForExecutable(cmb);
         parent.Controls.Add(btnBrowse);
 
         top += 30;
-        return cmb;
+        return (cmb, swatch);
     }
 
     private void PopulateSingleComboOptions(ModernComboBox cmb, bool includeGroups)
     {
-        string currentText = cmb.Text;
+        string currentText = ReadComboText(cmb);
         var list = includeGroups ? GetAvailableSourceOptions() : GetExecutableSuggestions();
         _isInitializing = true;
         cmb.Items.Clear();
         cmb.Items.AddRange(list.Cast<object>().ToArray());
-        cmb.Text = currentText;
+        cmb.SelectedItem = currentText;
+        if (cmb.SelectedIndex == -1) cmb.Text = currentText;
         _isInitializing = false;
     }
 
@@ -1781,15 +2143,18 @@ public class SettingsForm : Form
     {
         _detectedAudio = AudioProcessDetector.Scan();
         RefreshGroupsTabUI();
-        PopulateMultiVolumeSlotsUI();
 
         _cmbMode.SelectedItem = settings.OperationMode;
 
         _cmbSource1.SelectedItem = settings.Source1;
         if (!_cmbSource1.Items.Contains(settings.Source1)) _cmbSource1.Text = settings.Source1;
+        if (_swatchSource1 != null) _swatchSource1.BackColor = SafeParseHexColor(settings.Source1Color, Color.FromArgb(27, 59, 90));
 
         _cmbSource2.SelectedItem = settings.Source2;
         if (!_cmbSource2.Items.Contains(settings.Source2)) _cmbSource2.Text = settings.Source2;
+        if (_swatchSource2 != null) _swatchSource2.BackColor = SafeParseHexColor(settings.Source2Color, Color.FromArgb(74, 32, 64));
+
+        PopulateCycleListUI();
 
         bool isVolumeControl = (settings.OperationMode == "Volume Control");
         int k1 = isVolumeControl ? settings.VolKeyUp : settings.CrossfadeKeyUp;
@@ -1805,21 +2170,32 @@ public class SettingsForm : Form
         _txtKey3.Text = KeybindHelper.FormatKeybind(k3);
         _txtKey3.Tag = k3;
 
-        _txtKeySwap.Text = KeybindHelper.FormatKeybind(settings.QuickSwapKey);
-        _txtKeySwap.Tag = settings.QuickSwapKey;
+        int nextKey = settings.GetEffectiveCycleNextKey();
+        _txtKeyCycleNext.Text = KeybindHelper.FormatKeybind(nextKey);
+        _txtKeyCycleNext.Tag = nextKey;
+
+        _txtKeyCyclePrev.Text = KeybindHelper.FormatKeybind(settings.CyclePrevKey);
+        _txtKeyCyclePrev.Tag = settings.CyclePrevKey;
 
         _txtStepSize.Text = settings.StepSize.ToString();
         _chkBuffer.Checked = settings.EnableEqualizationBuffer;
         _chkStartup.Checked = settings.RunOnStartup;
 
+        _chkKeepOverlayAlwaysOn.Checked = settings.KeepOverlayOnWhileSettingsOpen;
         _cmbIdentityMode.SelectedItem = settings.OverlayIdentityMode;
         _cmbLevelMode.SelectedItem = settings.OverlayLevelMode;
-        _chkShowIconsInSettings.Checked = settings.ShowIconsInSettings;
+        _chkUseSourceBgColors.Checked = settings.UseSourceBackgroundColors;
+        _chkFadeBgWithVolume.Checked = settings.FadeBgColorWithVolume;
+        _chkFadeBgWithVolume.Enabled = settings.UseSourceBackgroundColors;
+        _cmbSingleSourceFillMode.SelectedItem = settings.SingleSourceBgFillMode;
+        _cmbSingleSourceFillMode.Enabled = settings.UseSourceBackgroundColors;
+        _txtCarouselNeighbors.Text = settings.CarouselVisibleNeighbors.ToString("0.0", CultureInfo.InvariantCulture);
+        _chkCarouselBlendColors.Checked = settings.CarouselBlendColors;
 
         if (_unmutedColorBox != null)
-            _unmutedColorBox.BackColor = ColorTranslator.FromHtml(settings.UnmutedColor);
+            _unmutedColorBox.BackColor = SafeParseHexColor(settings.UnmutedColor, Color.FromArgb(0, 168, 255));
         if (_mutedColorBox != null)
-            _mutedColorBox.BackColor = ColorTranslator.FromHtml(settings.MutedColor);
+            _mutedColorBox.BackColor = SafeParseHexColor(settings.MutedColor, Color.FromArgb(255, 71, 87));
 
         _cmbPosition.SelectedItem = settings.OverlayPosition;
         _txtPopupDuration.Text = settings.PopupDurationMs.ToString();
@@ -1840,6 +2216,7 @@ public class SettingsForm : Form
         UpdateContextUI(false);
         _isInitializing = false;
         MarkClean();
+        _context.NotifySettingsWindowState(true, _draftSettings);
     }
 
     private void RefreshGroupsTabUI()
@@ -1856,7 +2233,7 @@ public class SettingsForm : Form
 
         Label lblInfo = new Label
         {
-            Text = "Star (★) your favorite groups for Tray & Hotkey quick-swapping:",
+            Text = "Create program groups to control multiple applications together:",
             Left = 18,
             Top = 10,
             Width = 335,
@@ -1871,7 +2248,6 @@ public class SettingsForm : Form
             _draftSettings.Groups.Add(new ProgramGroup
             {
                 GroupName = $"Group{_draftSettings.Groups.Count + 1}",
-                IsFavorite = true,
                 Executables = new List<string> { "" }
             });
             RefreshGroupsTabUI();
@@ -1893,29 +2269,22 @@ public class SettingsForm : Form
                 Height = cardHeight
             };
 
-            StarToggleButton btnStar = new StarToggleButton
+            Label lblGroupName = new Label
             {
-                IsFavorite = group.IsFavorite,
+                Text = "Name:",
                 Left = 12,
-                Top = 10,
-                Width = 28,
-                Height = 25
+                Top = 14,
+                Width = 44,
+                ForeColor = Color.FromArgb(195, 195, 195)
             };
-            btnStar.Click += (s, e) =>
-            {
-                group.IsFavorite = !group.IsFavorite;
-                btnStar.IsFavorite = group.IsFavorite;
-                UpdateSourceDropdownOptions();
-                MarkDirty();
-            };
-            card.Controls.Add(btnStar);
+            card.Controls.Add(lblGroupName);
 
             TextBox txtGroupName = new TextBox
             {
                 Text = group.GroupName,
-                Left = 46,
+                Left = 58,
                 Top = 11,
-                Width = 284,
+                Width = 272,
                 BackColor = Color.FromArgb(52, 52, 52),
                 ForeColor = Color.White,
                 BorderStyle = BorderStyle.FixedSingle
@@ -1963,15 +2332,23 @@ public class SettingsForm : Form
                     IconResolver = ResolveDropdownIcon
                 };
                 cmbExe.Items.AddRange(exeSuggestions.Cast<object>().ToArray());
-                cmbExe.Text = group.Executables[index];
+                cmbExe.SelectedItem = group.Executables[index];
+                if (cmbExe.SelectedIndex == -1) cmbExe.Text = group.Executables[index];
                 cmbExe.DropDown += (s, e) =>
                 {
                     _detectedAudio = AudioProcessDetector.Scan();
                     PopulateSingleComboOptions(cmbExe, includeGroups: false);
                 };
+                cmbExe.SelectedIndexChanged += (s, e) =>
+                {
+                    if (_isInitializing) return;
+                    group.Executables[index] = ReadComboText(cmbExe);
+                    MarkDirty();
+                };
                 cmbExe.TextChanged += (s, e) =>
                 {
-                    group.Executables[index] = cmbExe.Text.Trim();
+                    if (_isInitializing) return;
+                    group.Executables[index] = ReadComboText(cmbExe);
                     MarkDirty();
                 };
                 card.Controls.Add(cmbExe);
@@ -1980,7 +2357,7 @@ public class SettingsForm : Form
                 btnBrowseExe.Click += (s, e) =>
                 {
                     BrowseForExecutable(cmbExe);
-                    group.Executables[index] = cmbExe.Text.Trim();
+                    group.Executables[index] = ReadComboText(cmbExe);
                 };
                 card.Controls.Add(btnBrowseExe);
 
@@ -2027,7 +2404,7 @@ public class SettingsForm : Form
     {
         List<string> options = new List<string>();
 
-        foreach (var group in _draftSettings.Groups.OrderByDescending(g => g.IsFavorite))
+        foreach (var group in _draftSettings.Groups)
         {
             if (!string.IsNullOrWhiteSpace(group.GroupName))
             {
@@ -2044,18 +2421,20 @@ public class SettingsForm : Form
         if (_cmbSource1 == null || _cmbSource2 == null) return;
         List<string> options = GetAvailableSourceOptions();
 
-        string cur1 = _cmbSource1.Text;
-        string cur2 = _cmbSource2.Text;
+        string cur1 = ReadComboText(_cmbSource1);
+        string cur2 = ReadComboText(_cmbSource2);
 
         _isInitializing = true;
 
         _cmbSource1.Items.Clear();
         _cmbSource1.Items.AddRange(options.Cast<object>().ToArray());
-        _cmbSource1.Text = cur1;
+        _cmbSource1.SelectedItem = cur1;
+        if (_cmbSource1.SelectedIndex == -1) _cmbSource1.Text = cur1;
 
         _cmbSource2.Items.Clear();
         _cmbSource2.Items.AddRange(options.Cast<object>().ToArray());
-        _cmbSource2.Text = cur2;
+        _cmbSource2.SelectedItem = cur2;
+        if (_cmbSource2.SelectedIndex == -1) _cmbSource2.Text = cur2;
 
         _isInitializing = false;
     }
@@ -2101,17 +2480,22 @@ public class SettingsForm : Form
 
         if (isVolumeControl)
         {
-            _lblKey1.Text = "Primary Vol Up:";
-            _lblKey2.Text = "Primary Vol Down:";
-            _lblKey3.Text = "Primary Mute:";
+            _lblKey1.Text = "Volume Up:";
+            _lblKey2.Text = "Volume Down:";
+            _lblKey3.Text = "Mute / Unmute:";
+            _lblKeyCycleNext.Text = "Cycle Next Source:";
+            _lblKeyCyclePrev.Text = "Cycle Prev Source:";
         }
         else
         {
             _lblKey1.Text = "Fade Up / Right:";
             _lblKey2.Text = "Fade Down / Left:";
             _lblKey3.Text = "Cycle Mute:";
+            _lblKeyCycleNext.Text = "Cycle Next Pair:";
+            _lblKeyCyclePrev.Text = "Cycle Prev Pair:";
         }
 
+        PopulateCycleListUI();
         ReflowGeneralPage();
     }
 
@@ -2122,7 +2506,7 @@ public class SettingsForm : Form
             Text = text,
             Left = left,
             Top = top,
-            Width = 320,
+            Width = 350,
             Height = 19,
             Font = new Font("Segoe UI Semibold", 9.75f, FontStyle.Bold),
             ForeColor = Color.FromArgb(96, 205, 255)
@@ -2217,7 +2601,7 @@ public class SettingsForm : Form
             Top = top,
             Width = 265,
             Height = 22,
-            BackColor = ColorTranslator.FromHtml(initialHex),
+            BackColor = SafeParseHexColor(initialHex, Color.FromArgb(0, 168, 255)),
             Cursor = Cursors.Hand
         };
 
@@ -2229,7 +2613,7 @@ public class SettingsForm : Form
 
         colorBox.Click += (s, e) =>
         {
-            using ColorDialog dlg = new ColorDialog();
+            using ColorDialog dlg = new ColorDialog { FullOpen = true };
             try { dlg.Color = colorBox.BackColor; } catch { }
             if (dlg.ShowDialog() == DialogResult.OK)
             {
@@ -2360,7 +2744,8 @@ public class SettingsForm : Form
         int key1Val = (int)(_txtKey1.Tag ?? 0);
         int key2Val = (int)(_txtKey2.Tag ?? 0);
         int key3Val = (int)(_txtKey3.Tag ?? 0);
-        int swapKeyVal = (int)(_txtKeySwap.Tag ?? 0);
+        int cycleNextVal = (int)(_txtKeyCycleNext.Tag ?? 0);
+        int cyclePrevVal = (int)(_txtKeyCyclePrev.Tag ?? 0);
 
         int cfUp = _draftSettings.CrossfadeKeyUp;
         int cfDown = _draftSettings.CrossfadeKeyDown;
@@ -2406,12 +2791,57 @@ public class SettingsForm : Form
                 string duplicatesFormatted = string.Join("\n• ", overlappingExes);
                 MessageBox.Show(
                     $"The following software is assigned to both Source 1 ({s1}) and Source 2 ({s2}):\n\n• {duplicatesFormatted}\n\n" +
-                    "Having the same program in both crossfade sources causes its volume to jump between 100% and the crossfaded level. " +
                     "Please remove the duplicate software from one of the groups or select different sources before saving.",
                     "Duplicate Software in Sources",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
                 return;
+            }
+        }
+
+        // Normalize and validate Cycle Lists
+        foreach (var entry in _draftSettings.VolumeCycleList)
+        {
+            if (!string.IsNullOrWhiteSpace(entry.Source) && !entry.Source.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase))
+            {
+                entry.Source = AppSettings.NormalizeExeName(entry.Source);
+                _draftSettings.RecordProgramHistory(entry.Source);
+            }
+        }
+
+        for (int i = 0; i < _draftSettings.CrossfadeCycleList.Count; i++)
+        {
+            var pair = _draftSettings.CrossfadeCycleList[i];
+            if (!string.IsNullOrWhiteSpace(pair.Source1) && !pair.Source1.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase))
+            {
+                pair.Source1 = AppSettings.NormalizeExeName(pair.Source1);
+                _draftSettings.RecordProgramHistory(pair.Source1);
+            }
+            if (!string.IsNullOrWhiteSpace(pair.Source2) && !pair.Source2.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase))
+            {
+                pair.Source2 = AppSettings.NormalizeExeName(pair.Source2);
+                _draftSettings.RecordProgramHistory(pair.Source2);
+            }
+
+            if (!string.IsNullOrWhiteSpace(pair.Source1) && !string.IsNullOrWhiteSpace(pair.Source2))
+            {
+                if (pair.Source1.Equals(pair.Source2, StringComparison.OrdinalIgnoreCase))
+                {
+                    MessageBox.Show($"Crossfade Cycle Pair #{i + 1} has the same source ({pair.Source1}) on both sides.", "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                var pairOverlaps = _draftSettings.GetOverlappingExecutables(pair.Source1, pair.Source2);
+                if (pairOverlaps.Count > 0)
+                {
+                    string dupList = string.Join("\n• ", pairOverlaps);
+                    MessageBox.Show(
+                        $"Crossfade Cycle Pair #{i + 1} ({pair.Source1} ⇄ {pair.Source2}) contains duplicate software on both sides:\n\n• {dupList}",
+                        "Duplicate Software in Cycle Pair",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    return;
+                }
             }
         }
 
@@ -2429,15 +2859,6 @@ public class SettingsForm : Form
             }
         }
 
-        foreach (var slot in _draftSettings.AdditionalVolumeSlots)
-        {
-            if (!string.IsNullOrWhiteSpace(slot.Source) && !slot.Source.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase))
-            {
-                slot.Source = AppSettings.NormalizeExeName(slot.Source);
-                _draftSettings.RecordProgramHistory(slot.Source);
-            }
-        }
-
         _draftSettings.RecordProgramHistory(s1);
         if (mode == "Crossfade")
         {
@@ -2449,7 +2870,9 @@ public class SettingsForm : Form
         _draftSettings.OperationMode = mode;
         _draftSettings.Source1 = s1;
         _draftSettings.Source2 = s2;
-        _draftSettings.QuickSwapKey = swapKeyVal;
+        _draftSettings.CycleNextKey = cycleNextVal;
+        _draftSettings.QuickSwapKey = cycleNextVal;
+        _draftSettings.CyclePrevKey = cyclePrevVal;
         _draftSettings.RunOnStartup = _chkStartup.Checked;
         _draftSettings.CrossfadeKeyUp = cfUp;
         _draftSettings.CrossfadeKeyDown = cfDown;
@@ -2457,6 +2880,7 @@ public class SettingsForm : Form
         _draftSettings.VolKeyUp = volUp;
         _draftSettings.VolKeyDown = volDown;
         _draftSettings.VolKeyMute = volMute;
+        _draftSettings.KeepOverlayOnWhileSettingsOpen = _chkKeepOverlayAlwaysOn.Checked;
         _draftSettings.OverlayPosition = _cmbPosition.SelectedItem?.ToString() ?? "Bottom Center";
         _draftSettings.PopupDurationMs = Math.Clamp(ParseInt(_txtPopupDuration.Text, 2500), 500, 10000);
         _draftSettings.StepSize = Math.Clamp(ParseInt(_txtStepSize.Text, 10), 1, 100);
@@ -2467,7 +2891,9 @@ public class SettingsForm : Form
         _draftSettings.EnableEqualizationBuffer = _chkBuffer.Checked;
         _draftSettings.OverlayIdentityMode = _cmbIdentityMode.SelectedItem?.ToString() ?? "Both";
         _draftSettings.OverlayLevelMode = _cmbLevelMode.SelectedItem?.ToString() ?? "Both";
-        _draftSettings.ShowIconsInSettings = _chkShowIconsInSettings.Checked;
+        _draftSettings.UseSourceBackgroundColors = _chkUseSourceBgColors.Checked;
+        _draftSettings.FadeBgColorWithVolume = _chkFadeBgWithVolume.Checked;
+        _draftSettings.SingleSourceBgFillMode = _cmbSingleSourceFillMode.SelectedItem?.ToString() ?? "Solid Fill";
 
         try
         {
@@ -2482,17 +2908,27 @@ public class SettingsForm : Form
         _context.SaveSettings(_draftSettings);
 
         RefreshGroupsTabUI();
+        PopulateCycleListUI();
+        ReflowGeneralPage();
         MarkClean();
     }
 }
 
-// Click-Through 60 FPS Overlay Popup with Mirrored Header & Fixed-Width Percentage Slot
+// Hardware-Accelerated DWM Fullscreen-Compatible 60 FPS Overlay with Color Interpolation & Cycle Wheel Column
 public class VolumeOverlayForm : Form
 {
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
     private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private static readonly Color DefaultDarkGrey = Color.FromArgb(25, 25, 25);
+
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOACTIVATE = 0x0010;
@@ -2507,15 +2943,32 @@ public class VolumeOverlayForm : Form
     private string _app2Label;
     private string _rawSource1;
     private string _rawSource2;
-    private readonly AppSettings _settings;
+    private string _color1Hex;
+    private string _color2Hex;
+    private AppSettings _settings;
     private bool _isSingleSource;
     private float _app1Vol = 0.5f;
     private float _app2Vol = 0.5f;
     private int _muteState = 0;
+
+    // Smoothly interpolated background & bar colors
+    private Color _renderedBgLeft = DefaultDarkGrey;
+    private Color _renderedBgRight = DefaultDarkGrey;
+    private Color _renderedBar1 = Color.FromArgb(0, 168, 255);
+    private Color _renderedBar2 = Color.FromArgb(0, 168, 255);
+
+    // Cycle Wheel Column State (1.5 items above + 1 active + 1.5 items below = 4.0x base height)
+    private List<CycleDisplayItem> _cycleItems = new List<CycleDisplayItem>();
+    private int _cycleActiveIndex = 0;
+    private int _cycleCountdownMs = 0;
+    private float _wheelExpansion = 0f; // 0 = compact, 1 = full 4x height column
+    private float _wheelScrollOffset = 0f; // Animates from +1 or -1 toward 0 on cycle
+
     private System.Windows.Forms.Timer? _fadeTimer;
     private int _displayCountdownMs = 0;
-    private readonly int _totalDurationMs = 2500;
+    private int _totalDurationMs = 2500;
     private bool _isFadingOut = false;
+    private bool _pinnedBySettings = false;
 
     [Browsable(false)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -2539,7 +2992,9 @@ public class VolumeOverlayForm : Form
         _app2Label = app2;
         _rawSource1 = settings.Source1;
         _rawSource2 = settings.Source2;
-        _settings = settings;
+        _color1Hex = settings.Source1Color;
+        _color2Hex = settings.Source2Color;
+        _settings = settings.Clone();
 
         _isSingleSource = (_settings.OperationMode == "Volume Control" || string.IsNullOrEmpty(_app2Label));
 
@@ -2547,67 +3002,269 @@ public class VolumeOverlayForm : Form
         this.StartPosition = FormStartPosition.Manual;
         this.ShowInTaskbar = false;
         this.TopMost = true;
-        this.BackColor = Color.FromArgb(30, 30, 30);
+        this.BackColor = DefaultDarkGrey;
         this.ClientSize = new Size(Math.Max(120, _settings.OverlayWidth), Math.Max(50, _settings.OverlayHeight));
 
         _totalDurationMs = Math.Max(500, _settings.PopupDurationMs);
+        SnapInterpolatedColorsImmediate();
 
-        Rectangle workingArea = Screen.PrimaryScreen?.WorkingArea ?? Screen.AllScreens[0].WorkingArea;
-        int x = workingArea.Left + (workingArea.Width - this.Width) / 2;
-        int y = workingArea.Bottom - this.Height - 65;
+        PositionOnActiveScreen();
+        this.SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+
+        _fadeTimer = new System.Windows.Forms.Timer { Interval = 16 };
+        _fadeTimer.Tick += OnAnimationTick;
+        _fadeTimer.Start();
+        this.Opacity = 0.0;
+    }
+
+    private void OnAnimationTick(object? sender, EventArgs e)
+    {
+        if (_pinnedBySettings)
+        {
+            _isFadingOut = false;
+            _displayCountdownMs = _totalDurationMs;
+        }
+
+        // Update Cycle Wheel column timers & expansion animation
+        if (_cycleCountdownMs > 0)
+        {
+            _cycleCountdownMs -= 16;
+        }
+
+        float targetExpansion = (_cycleCountdownMs > 0 && _cycleItems.Count > 0) ? 1.0f : 0.0f;
+        float lerpSpeed = _settings.EnableInterpolation
+            ? Math.Clamp(_settings.InterpolationSpeed, 5, 100) / 100.0f
+            : 1.0f;
+        float wheelLerp = Math.Clamp(lerpSpeed * 0.65f, 0.18f, 0.85f);
+
+        if (Math.Abs(targetExpansion - _wheelExpansion) > 0.004f)
+        {
+            _wheelExpansion += (targetExpansion - _wheelExpansion) * wheelLerp;
+        }
+        else
+        {
+            _wheelExpansion = targetExpansion;
+        }
+
+        if (Math.Abs(_wheelScrollOffset) > 0.005f)
+        {
+            _wheelScrollOffset *= (1.0f - Math.Clamp(wheelLerp * 0.85f, 0.20f, 0.75f));
+        }
+        else
+        {
+            _wheelScrollOffset = 0f;
+        }
+
+        UpdateWindowGeometryForWheel();
+        StepColorInterpolations(lerpSpeed);
+
+        if (!_isFadingOut)
+        {
+            EnsureTopMost();
+
+            if (this.Opacity < 1.0)
+            {
+                this.Opacity = Math.Min(1.0, this.Opacity + 0.22);
+            }
+            if (!_pinnedBySettings && _displayCountdownMs > 0)
+            {
+                _displayCountdownMs -= 16;
+                if (_displayCountdownMs <= 0) _isFadingOut = true;
+            }
+        }
+        else
+        {
+            if (this.Opacity > 0.0)
+            {
+                this.Opacity = Math.Max(0.0, this.Opacity - 0.12);
+            }
+            else
+            {
+                this.Opacity = 0.0;
+                _wheelExpansion = 0f;
+                _cycleCountdownMs = 0;
+                UpdateWindowGeometryForWheel();
+                _fadeTimer?.Stop();
+            }
+        }
+        this.Invalidate();
+    }
+
+    private static Color ColorLerp(Color from, Color to, float t)
+    {
+        t = Math.Clamp(t, 0f, 1f);
+        int a = (int)Math.Round(from.A + (to.A - from.A) * t);
+        int r = (int)Math.Round(from.R + (to.R - from.R) * t);
+        int g = (int)Math.Round(from.G + (to.G - from.G) * t);
+        int b = (int)Math.Round(from.B + (to.B - from.B) * t);
+        return Color.FromArgb(Math.Clamp(a, 0, 255), Math.Clamp(r, 0, 255), Math.Clamp(g, 0, 255), Math.Clamp(b, 0, 255));
+    }
+
+    private (Color targetLeft, Color targetRight, Color targetBar1, Color targetBar2) ComputeTargetColors()
+    {
+        Color unmutedColor = ParseOverlayColor(_settings.UnmutedColor, Color.FromArgb(0, 168, 255));
+        Color mutedColor = ParseOverlayColor(_settings.MutedColor, Color.FromArgb(255, 71, 87));
+
+        bool app1Muted = _isSingleSource ? (_muteState > 0) : (_muteState == 2);
+        bool app2Muted = !_isSingleSource && (_muteState == 1);
+
+        Color bar1 = app1Muted ? mutedColor : unmutedColor;
+        Color bar2 = app2Muted ? mutedColor : unmutedColor;
+
+        if (!_settings.UseSourceBackgroundColors)
+        {
+            return (DefaultDarkGrey, DefaultDarkGrey, bar1, bar2);
+        }
+
+        Color rawC1 = ParseOverlayColor(_color1Hex, Color.FromArgb(27, 59, 90));
+        float effVol1 = app1Muted ? 0f : Math.Clamp(_app1Vol, 0f, 1f);
+        Color effectiveC1 = _settings.FadeBgColorWithVolume
+            ? ColorLerp(DefaultDarkGrey, rawC1, effVol1)
+            : rawC1;
+
+        if (_isSingleSource)
+        {
+            bool gradientToGrey = string.Equals(_settings.SingleSourceBgFillMode, "Gradient to Dark Grey", StringComparison.OrdinalIgnoreCase);
+            Color rightC = gradientToGrey ? DefaultDarkGrey : effectiveC1;
+            return (effectiveC1, rightC, bar1, bar2);
+        }
+        else
+        {
+            Color rawC2 = ParseOverlayColor(_color2Hex, Color.FromArgb(74, 32, 64));
+            float effVol2 = app2Muted ? 0f : Math.Clamp(_app2Vol, 0f, 1f);
+            Color effectiveC2 = _settings.FadeBgColorWithVolume
+                ? ColorLerp(DefaultDarkGrey, rawC2, effVol2)
+                : rawC2;
+
+            return (effectiveC1, effectiveC2, bar1, bar2);
+        }
+    }
+
+    private void SnapInterpolatedColorsImmediate()
+    {
+        var targets = ComputeTargetColors();
+        _renderedBgLeft = targets.targetLeft;
+        _renderedBgRight = targets.targetRight;
+        _renderedBar1 = targets.targetBar1;
+        _renderedBar2 = targets.targetBar2;
+    }
+
+    private void StepColorInterpolations(float factor)
+    {
+        var targets = ComputeTargetColors();
+        float cLerp = _settings.EnableInterpolation ? Math.Clamp(factor * 0.55f, 0.12f, 1.0f) : 1.0f;
+
+        _renderedBgLeft = ColorLerp(_renderedBgLeft, targets.targetLeft, cLerp);
+        _renderedBgRight = ColorLerp(_renderedBgRight, targets.targetRight, cLerp);
+        _renderedBar1 = ColorLerp(_renderedBar1, targets.targetBar1, cLerp);
+        _renderedBar2 = ColorLerp(_renderedBar2, targets.targetBar2, cLerp);
+    }
+
+    public void ApplyLivePreviewSettings(AppSettings newSettings, bool pinnedWhileSettingsOpen, bool forcePopup)
+    {
+        if (this.IsDisposed || !this.IsHandleCreated) return;
+
+        this.BeginInvoke(new Action(() =>
+        {
+            _settings = newSettings.Clone();
+            _pinnedBySettings = pinnedWhileSettingsOpen;
+            _totalDurationMs = Math.Max(500, _settings.PopupDurationMs);
+            _color1Hex = _settings.Source1Color;
+            _color2Hex = _settings.Source2Color;
+            _rawSource1 = _settings.Source1;
+            _rawSource2 = _settings.Source2;
+            _app1Label = AudioCrossfaderWorker.GetResolvedLabel(_rawSource1);
+            _app2Label = AudioCrossfaderWorker.GetResolvedLabel(_rawSource2);
+            _isSingleSource = (_settings.OperationMode == "Volume Control" || string.IsNullOrEmpty(_app2Label));
+
+            if (forcePopup || _pinnedBySettings)
+            {
+                _displayCountdownMs = _totalDurationMs;
+                _isFadingOut = false;
+                UpdateWindowGeometryForWheel();
+                EnsureTopMost();
+                if (_fadeTimer != null && !_fadeTimer.Enabled)
+                {
+                    _fadeTimer.Start();
+                }
+            }
+            this.Invalidate();
+        }));
+    }
+
+    public void TriggerCycleWheel(List<CycleDisplayItem> items, int activeIndex, int stepDirection)
+    {
+        if (this.IsDisposed || !this.IsHandleCreated) return;
+
+        this.BeginInvoke(new Action(() =>
+        {
+            _cycleItems = items ?? new List<CycleDisplayItem>();
+            _cycleActiveIndex = Math.Max(0, activeIndex);
+            _cycleCountdownMs = Math.Max(1800, _totalDurationMs);
+            _displayCountdownMs = Math.Max(_displayCountdownMs, _cycleCountdownMs);
+            _isFadingOut = false;
+            _wheelScrollOffset = stepDirection >= 0 ? 1.0f : -1.0f;
+
+            if (_fadeTimer != null && !_fadeTimer.Enabled)
+            {
+                _fadeTimer.Start();
+            }
+            EnsureTopMost();
+            this.Invalidate();
+        }));
+    }
+
+    private void UpdateWindowGeometryForWheel()
+    {
+        int baseW = Math.Max(120, _settings.OverlayWidth);
+        int baseH = Math.Max(50, _settings.OverlayHeight);
+
+        // 1.5 items above + 1 active item + 1.5 items below = 4.0x base height when fully expanded
+        int totalH = baseH + (int)Math.Round(baseH * 3.0f * _wheelExpansion);
+
+        Screen targetScreen = Screen.PrimaryScreen ?? Screen.AllScreens[0];
+        try
+        {
+            IntPtr fgHwnd = GetForegroundWindow();
+            if (fgHwnd != IntPtr.Zero)
+            {
+                targetScreen = Screen.FromHandle(fgHwnd);
+            }
+        }
+        catch { }
+
+        Rectangle bounds = targetScreen.Bounds;
+        int baseX = bounds.Left + (bounds.Width - baseW) / 2;
+        int baseY = bounds.Bottom - baseH - 65;
 
         switch (_settings.OverlayPosition)
         {
             case "Top Center":
-                x = workingArea.Left + (workingArea.Width - this.Width) / 2; y = workingArea.Top + 40; break;
+                baseX = bounds.Left + (bounds.Width - baseW) / 2; baseY = bounds.Top + 40; break;
             case "Bottom Right":
-                x = workingArea.Right - this.Width - 40; y = workingArea.Bottom - this.Height - 65; break;
+                baseX = bounds.Right - baseW - 40; baseY = bounds.Bottom - baseH - 65; break;
             case "Bottom Left":
-                x = workingArea.Left + 40; y = workingArea.Bottom - this.Height - 65; break;
+                baseX = bounds.Left + 40; baseY = bounds.Bottom - baseH - 65; break;
             case "Top Right":
-                x = workingArea.Right - this.Width - 40; y = workingArea.Top + 40; break;
+                baseX = bounds.Right - baseW - 40; baseY = bounds.Top + 40; break;
             case "Top Left":
-                x = workingArea.Left + 40; y = workingArea.Top + 40; break;
+                baseX = bounds.Left + 40; baseY = bounds.Top + 40; break;
             case "Bottom Center":
             default:
-                x = workingArea.Left + (workingArea.Width - this.Width) / 2; y = workingArea.Bottom - this.Height - 65; break;
+                baseX = bounds.Left + (bounds.Width - baseW) / 2; baseY = bounds.Bottom - baseH - 65; break;
         }
 
-        this.Location = new Point(x, y);
-        this.SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        // Expand symmetrically up and down around the active center slot, clamped safely inside screen bounds
+        int extraEachSide = (totalH - baseH) / 2;
+        int targetY = Math.Clamp(baseY - extraEachSide, bounds.Top + 12, Math.Max(bounds.Top + 12, bounds.Bottom - totalH - 12));
 
-        _fadeTimer = new System.Windows.Forms.Timer { Interval = 16 };
-        _fadeTimer.Tick += (s, e) =>
+        if (this.Width != baseW || this.Height != totalH || this.Left != baseX || this.Top != targetY)
         {
-            if (!_isFadingOut)
-            {
-                if (this.Opacity < 1.0)
-                {
-                    this.Opacity = Math.Min(1.0, this.Opacity + 0.22);
-                }
-                if (_displayCountdownMs > 0)
-                {
-                    _displayCountdownMs -= 16;
-                    if (_displayCountdownMs <= 0) _isFadingOut = true;
-                }
-            }
-            else
-            {
-                if (this.Opacity > 0.0)
-                {
-                    this.Opacity = Math.Max(0.0, this.Opacity - 0.12);
-                }
-                else
-                {
-                    this.Opacity = 0.0;
-                    _fadeTimer.Stop();
-                }
-            }
-            this.Invalidate();
-        };
-        _fadeTimer.Start();
-        this.Opacity = 0.0;
+            this.Bounds = new Rectangle(baseX, targetY, baseW, totalH);
+        }
     }
+
+    private void PositionOnActiveScreen() => UpdateWindowGeometryForWheel();
 
     private void EnsureTopMost()
     {
@@ -2620,25 +3277,13 @@ public class VolumeOverlayForm : Form
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
-        UpdateRegionPath();
-        EnsureTopMost();
-    }
-
-    private void UpdateRegionPath()
-    {
         try
         {
-            if (this.Width < 10 || this.Height < 10) return;
-            using GraphicsPath path = new GraphicsPath();
-            int radius = Math.Min(16, this.Height / 2);
-            path.AddArc(0, 0, radius, radius, 180, 90);
-            path.AddArc(this.Width - radius, 0, radius, radius, 270, 90);
-            path.AddArc(this.Width - radius, this.Height - radius, radius, radius, 0, 90);
-            path.AddArc(0, this.Height - radius, radius, radius, 90, 90);
-            path.CloseFigure();
-            this.Region = new Region(path);
+            int cornerPreference = 2; // DWMWCP_ROUND
+            DwmSetWindowAttribute(this.Handle, 33, ref cornerPreference, sizeof(int));
         }
         catch { }
+        EnsureTopMost();
     }
 
     public void UpdateDynamicOverlay(
@@ -2647,6 +3292,8 @@ public class VolumeOverlayForm : Form
         string label2,
         string rawSource1,
         string rawSource2,
+        string color1Hex,
+        string color2Hex,
         float app1Vol,
         float app2Vol,
         int muteState,
@@ -2657,6 +3304,8 @@ public class VolumeOverlayForm : Form
         _app2Label = label2;
         _rawSource1 = rawSource1;
         _rawSource2 = rawSource2;
+        _color1Hex = color1Hex;
+        _color2Hex = color2Hex;
         _app1Vol = app1Vol;
         _app2Vol = app2Vol;
         _muteState = muteState;
@@ -2673,6 +3322,7 @@ public class VolumeOverlayForm : Form
             {
                 if (forceShow)
                 {
+                    UpdateWindowGeometryForWheel();
                     EnsureTopMost();
                     if (_fadeTimer != null && !_fadeTimer.Enabled)
                     {
@@ -2687,9 +3337,6 @@ public class VolumeOverlayForm : Form
         }
     }
 
-    // Locks the width of the percentage readout to "100%" so the icon and program name never shift
-    // Mirrors the layout on the left side ([Pct] [Name] [Icon] | [Icon] [Name] [Pct])
-    // and keeps the percentage slot locked to "100%" width so nothing ever shifts.
     private void DrawHeaderBadge(
         Graphics g,
         RectangleF bounds,
@@ -2701,7 +3348,8 @@ public class VolumeOverlayForm : Form
         bool showName,
         bool showIcon,
         bool showInlinePercent,
-        StringAlignment horizontalAlign)
+        StringAlignment horizontalAlign,
+        Color textColorOverride)
     {
         Bitmap? icon = showIcon ? AppIconCache.GetIconForSource(rawSource, _settings) : null;
         int iconPx = icon != null ? (int)Math.Clamp(20 * scale, 14, 36) : 0;
@@ -2728,10 +3376,8 @@ public class VolumeOverlayForm : Form
         startX = Math.Max(bounds.X, startX);
         float centerY = bounds.Y + bounds.Height / 2f;
 
-        Color textColor = isMuted ? ColorTranslator.FromHtml(_settings.MutedColor) : Color.White;
-        using SolidBrush textBrush = new SolidBrush(textColor);
+        using SolidBrush textBrush = new SolidBrush(textColorOverride);
 
-        // Left side of crossfader (StringAlignment.Far): Draw [Percentage] -> [Name] -> [Icon]
         bool mirrorOrder = (horizontalAlign == StringAlignment.Far);
 
         if (mirrorOrder)
@@ -2762,7 +3408,6 @@ public class VolumeOverlayForm : Form
         }
         else
         {
-            // Right side & Single Source: Draw [Icon] -> [Name] -> [Percentage]
             if (icon != null)
             {
                 g.DrawImage(icon, new RectangleF(startX, centerY - iconPx / 2f, iconPx, iconPx));
@@ -2789,7 +3434,6 @@ public class VolumeOverlayForm : Form
         }
     }
 
-    // Snaps the visual bar cleanly to 0px at <= 1% and full barWidth at >= 98.5%
     private static int GetSnappedFillWidth(int barWidth, float vol)
     {
         if (vol <= 0.01f) return 0;
@@ -2797,54 +3441,80 @@ public class VolumeOverlayForm : Form
         return Math.Clamp((int)Math.Round(barWidth * vol), 0, barWidth);
     }
 
-    protected override void OnPaint(PaintEventArgs e)
+    private static Color ParseOverlayColor(string hex, Color defaultColor)
     {
-        base.OnPaint(e);
-        if (this.ClientRectangle.Width <= 10 || this.ClientRectangle.Height <= 10) return;
-
-        Graphics g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-
-        using (Brush bgBrush = new SolidBrush(Color.FromArgb(238, 25, 25, 25)))
+        try
         {
-            g.FillRectangle(bgBrush, this.ClientRectangle);
+            if (!string.IsNullOrWhiteSpace(hex))
+                return ColorTranslator.FromHtml(hex);
+        }
+        catch { }
+        return defaultColor;
+    }
+
+    private void FillSlotBackground(Graphics g, RectangleF slotRect, Color leftColor, Color rightColor)
+    {
+        if (slotRect.Width <= 0 || slotRect.Height <= 0) return;
+
+        if (leftColor.ToArgb() == rightColor.ToArgb())
+        {
+            using SolidBrush sb = new SolidBrush(leftColor);
+            g.FillRectangle(sb, slotRect);
+            return;
         }
 
-        int centerX = this.Width / 2;
-        float scale = Math.Clamp((float)this.Height / 80f, 0.5f, 5.0f);
+        using LinearGradientBrush gradBrush = new LinearGradientBrush(
+            new PointF(slotRect.Left, slotRect.Top),
+            new PointF(slotRect.Right, slotRect.Top),
+            leftColor,
+            rightColor);
+
+        ColorBlend blend = new ColorBlend
+        {
+            Colors = new[] { leftColor, leftColor, rightColor, rightColor },
+            Positions = new[] { 0.0f, 0.22f, 0.78f, 1.0f }
+        };
+        gradBrush.InterpolationColors = blend;
+        g.FillRectangle(gradBrush, slotRect);
+    }
+
+    private void DrawActiveHUDContent(Graphics g, RectangleF activeBounds, float scale)
+    {
+        int width = (int)activeBounds.Width;
+        int height = (int)activeBounds.Height;
+        float topY = activeBounds.Y;
+        int centerX = width / 2;
 
         bool showName = _settings.OverlayIdentityMode == "Name" || _settings.OverlayIdentityMode == "Both";
         bool showIcon = _settings.OverlayIdentityMode == "Icon" || _settings.OverlayIdentityMode == "Both";
         bool showBar = _settings.OverlayLevelMode == "Bar" || _settings.OverlayLevelMode == "Both";
         bool showPct = _settings.OverlayLevelMode == "Percentage" || _settings.OverlayLevelMode == "Both";
 
-        Color unmutedColor = ColorTranslator.FromHtml(_settings.UnmutedColor);
-        Color mutedColor = ColorTranslator.FromHtml(_settings.MutedColor);
+        Color mutedColor = ParseOverlayColor(_settings.MutedColor, Color.FromArgb(255, 71, 87));
 
         if (_isSingleSource)
         {
             bool isMuted = (_muteState > 0);
-            Color activeColor = isMuted ? mutedColor : unmutedColor;
+            Color headerTextColor = isMuted ? mutedColor : Color.White;
             int sideMargin = 26;
 
             if (showBar)
             {
-                RectangleF headerBounds = new RectangleF(sideMargin, 6 * scale, this.Width - sideMargin * 2, this.Height * 0.48f);
-                DrawHeaderBadge(g, headerBounds, _app1Label, _rawSource1, _app1Vol, isMuted, scale, showName, showIcon, showPct, StringAlignment.Center);
+                RectangleF headerBounds = new RectangleF(sideMargin, topY + 6 * scale, width - sideMargin * 2, height * 0.48f);
+                DrawHeaderBadge(g, headerBounds, _app1Label, _rawSource1, _app1Vol, isMuted, scale, showName, showIcon, showPct, StringAlignment.Center, headerTextColor);
 
-                int barWidth = Math.Max(20, this.Width - (sideMargin * 2));
+                int barWidth = Math.Max(20, width - (sideMargin * 2));
                 int barHeight = Math.Clamp((int)(14 * scale), 8, 40);
-                int barY = Math.Clamp((int)(this.Height * 0.60f), 10, Math.Max(10, this.Height - barHeight - 6));
+                int barY = (int)topY + Math.Clamp((int)(height * 0.60f), 10, Math.Max(10, height - barHeight - 6));
 
-                using Brush barBrush = new SolidBrush(activeColor);
-                using Brush trackBgBrush = new SolidBrush(Color.FromArgb(50, 50, 50));
+                using Brush barBrush = new SolidBrush(_renderedBar1);
+                using Brush trackBgBrush = new SolidBrush(Color.FromArgb(120, 15, 15, 15));
 
                 using (GraphicsPath? trackPath = GetSafeRoundedBarPath(sideMargin, barY, barWidth, barHeight, true, true))
                 {
                     if (trackPath != null) g.FillPath(trackBgBrush, trackPath);
                 }
 
-                // Uses GetSnappedFillWidth instead of (int)(barWidth * _app1Vol)
                 int fillWidth = GetSnappedFillWidth(barWidth, _app1Vol);
                 if (fillWidth > 0)
                 {
@@ -2856,41 +3526,46 @@ public class VolumeOverlayForm : Form
             }
             else
             {
-                RectangleF headerBounds = new RectangleF(sideMargin, 6 * scale, this.Width - sideMargin * 2, this.Height * 0.42f);
-                DrawHeaderBadge(g, headerBounds, _app1Label, _rawSource1, _app1Vol, isMuted, scale, showName, showIcon, false, StringAlignment.Center);
+                RectangleF headerBounds = new RectangleF(sideMargin, topY + 6 * scale, width - sideMargin * 2, height * 0.42f);
+                DrawHeaderBadge(g, headerBounds, _app1Label, _rawSource1, _app1Vol, isMuted, scale, showName, showIcon, false, StringAlignment.Center, headerTextColor);
 
                 string bigPct = isMuted ? "MUTED" : $"{(int)Math.Round(_app1Vol * 100)}%";
                 using Font bigFont = new Font("Segoe UI", Math.Clamp(18f * scale, 10f, 44f), FontStyle.Bold);
-                using SolidBrush pctBrush = new SolidBrush(activeColor);
+                using SolidBrush pctBrush = new SolidBrush(_renderedBar1);
                 using StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                g.DrawString(bigPct, bigFont, pctBrush, new RectangleF(0, this.Height * 0.42f, this.Width, this.Height * 0.52f), sf);
+                g.DrawString(bigPct, bigFont, pctBrush, new RectangleF(0, topY + height * 0.42f, width, height * 0.52f), sf);
             }
         }
         else
         {
-            int centerLineTop = (int)(10 * scale);
-            int centerLineHeight = Math.Max(10, this.Height - (centerLineTop * 2));
-            g.FillRectangle(Brushes.DimGray, centerX - 1, centerLineTop, 2, centerLineHeight);
+            int centerLineTop = (int)topY + (int)(10 * scale);
+            int centerLineHeight = Math.Max(10, height - (int)(20 * scale));
+            using (SolidBrush dividerBrush = new SolidBrush(Color.FromArgb(150, 220, 220, 220)))
+            {
+                g.FillRectangle(dividerBrush, centerX - 1, centerLineTop, 2, centerLineHeight);
+            }
 
             bool app1Muted = (_muteState == 2);
             bool app2Muted = (_muteState == 1);
+            Color text1Color = app1Muted ? mutedColor : Color.White;
+            Color text2Color = app2Muted ? mutedColor : Color.White;
             int sideMargin = 20;
 
-            RectangleF leftHeader = new RectangleF(sideMargin, 6 * scale, centerX - sideMargin - 10, this.Height * 0.48f);
-            RectangleF rightHeader = new RectangleF(centerX + 10, 6 * scale, centerX - sideMargin - 10, this.Height * 0.48f);
+            RectangleF leftHeader = new RectangleF(sideMargin, topY + 6 * scale, centerX - sideMargin - 10, height * 0.48f);
+            RectangleF rightHeader = new RectangleF(centerX + 10, topY + 6 * scale, centerX - sideMargin - 10, height * 0.48f);
 
             if (showBar)
             {
-                DrawHeaderBadge(g, leftHeader, _app1Label, _rawSource1, _app1Vol, app1Muted, scale, showName, showIcon, showPct, StringAlignment.Far);
-                DrawHeaderBadge(g, rightHeader, _app2Label, _rawSource2, _app2Vol, app2Muted, scale, showName, showIcon, showPct, StringAlignment.Near);
+                DrawHeaderBadge(g, leftHeader, _app1Label, _rawSource1, _app1Vol, app1Muted, scale, showName, showIcon, showPct, StringAlignment.Far, text1Color);
+                DrawHeaderBadge(g, rightHeader, _app2Label, _rawSource2, _app2Vol, app2Muted, scale, showName, showIcon, showPct, StringAlignment.Near, text2Color);
 
                 int barWidth = Math.Max(20, centerX - sideMargin - 8);
                 int barHeight = Math.Clamp((int)(14 * scale), 8, 40);
-                int barY = Math.Clamp((int)(this.Height * 0.60f), 10, Math.Max(10, this.Height - barHeight - 6));
+                int barY = (int)topY + Math.Clamp((int)(height * 0.60f), 10, Math.Max(10, height - barHeight - 6));
 
-                using Brush app1BarColor = new SolidBrush(app1Muted ? mutedColor : unmutedColor);
-                using Brush app2BarColor = new SolidBrush(app2Muted ? mutedColor : unmutedColor);
-                using Brush trackBgBrush = new SolidBrush(Color.FromArgb(50, 50, 50));
+                using Brush app1BarColor = new SolidBrush(_renderedBar1);
+                using Brush app2BarColor = new SolidBrush(_renderedBar2);
+                using Brush trackBgBrush = new SolidBrush(Color.FromArgb(120, 15, 15, 15));
 
                 using (GraphicsPath? app1TrackPath = GetSafeRoundedBarPath(centerX - barWidth, barY, barWidth, barHeight, true, false))
                 {
@@ -2901,7 +3576,6 @@ public class VolumeOverlayForm : Form
                     if (app2TrackPath != null) g.FillPath(trackBgBrush, app2TrackPath);
                 }
 
-                // Uses GetSnappedFillWidth instead of (int)(barWidth * _app1Vol)
                 int app1FillWidth = GetSnappedFillWidth(barWidth, _app1Vol);
                 if (app1FillWidth > 0)
                 {
@@ -2911,7 +3585,6 @@ public class VolumeOverlayForm : Form
                     }
                 }
 
-                // Uses GetSnappedFillWidth instead of (int)(barWidth * _app2Vol)
                 int app2FillWidth = GetSnappedFillWidth(barWidth, _app2Vol);
                 if (app2FillWidth > 0)
                 {
@@ -2923,38 +3596,147 @@ public class VolumeOverlayForm : Form
             }
             else
             {
-                DrawHeaderBadge(g, leftHeader, _app1Label, _rawSource1, _app1Vol, app1Muted, scale, showName, showIcon, false, StringAlignment.Center);
-                DrawHeaderBadge(g, rightHeader, _app2Label, _rawSource2, _app2Vol, app2Muted, scale, showName, showIcon, false, StringAlignment.Center);
+                DrawHeaderBadge(g, leftHeader, _app1Label, _rawSource1, _app1Vol, app1Muted, scale, showName, showIcon, false, StringAlignment.Far, text1Color);
+                DrawHeaderBadge(g, rightHeader, _app2Label, _rawSource2, _app2Vol, app2Muted, scale, showName, showIcon, false, StringAlignment.Near, text2Color);
 
                 string p1 = app1Muted ? "MUTED" : $"{(int)Math.Round(_app1Vol * 100)}%";
                 string p2 = app2Muted ? "MUTED" : $"{(int)Math.Round(_app2Vol * 100)}%";
 
                 using Font bigFont = new Font("Segoe UI", Math.Clamp(16f * scale, 9f, 40f), FontStyle.Bold);
-                using SolidBrush b1 = new SolidBrush(app1Muted ? mutedColor : unmutedColor);
-                using SolidBrush b2 = new SolidBrush(app2Muted ? mutedColor : unmutedColor);
+                using SolidBrush b1 = new SolidBrush(_renderedBar1);
+                using SolidBrush b2 = new SolidBrush(_renderedBar2);
                 using StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
 
-                g.DrawString(p1, bigFont, b1, new RectangleF(sideMargin, this.Height * 0.44f, centerX - sideMargin - 6, this.Height * 0.50f), sf);
-                g.DrawString(p2, bigFont, b2, new RectangleF(centerX + 6, this.Height * 0.44f, centerX - sideMargin - 6, this.Height * 0.50f), sf);
+                g.DrawString(p1, bigFont, b1, new RectangleF(sideMargin, topY + height * 0.44f, centerX - sideMargin - 6, height * 0.50f), sf);
+                g.DrawString(p2, bigFont, b2, new RectangleF(centerX + 6, topY + height * 0.44f, centerX - sideMargin - 6, height * 0.50f), sf);
             }
         }
+    }
 
-        using (GraphicsPath borderPath = new GraphicsPath())
+    private void DrawNeighborCycleSlot(Graphics g, RectangleF slotRect, CycleDisplayItem item, float distanceFromCenter, float scale)
+    {
+        if (slotRect.Bottom < 0 || slotRect.Top > this.Height) return;
+
+        // Smoothly blend neighbor background colors toward DefaultDarkGrey based on distance from active center
+        float colorRetention = Math.Clamp(1.0f - (distanceFromCenter * 0.42f), 0.18f, 0.72f);
+        Color c1 = _settings.UseSourceBackgroundColors
+            ? ColorLerp(DefaultDarkGrey, ParseOverlayColor(item.Color1Hex, DefaultDarkGrey), colorRetention)
+            : DefaultDarkGrey;
+
+        Color c2;
+        if (item.IsSingleSource)
         {
-            int radius = Math.Min(16, this.Height / 2);
-            Rectangle borderRect = new Rectangle(0, 0, Math.Max(1, this.Width - 1), Math.Max(1, this.Height - 1));
-            if (borderRect.Width > radius * 2 && borderRect.Height > radius * 2)
-            {
-                borderPath.AddArc(borderRect.X, borderRect.Y, radius, radius, 180, 90);
-                borderPath.AddArc(borderRect.Right - radius, borderRect.Y, radius, radius, 270, 90);
-                borderPath.AddArc(borderRect.Right - radius, borderRect.Bottom - radius, radius, radius, 0, 90);
-                borderPath.AddArc(borderRect.X, borderRect.Bottom - radius, radius, radius, 90, 90);
-                borderPath.CloseFigure();
+            bool gradGrey = string.Equals(_settings.SingleSourceBgFillMode, "Gradient to Dark Grey", StringComparison.OrdinalIgnoreCase);
+            c2 = gradGrey ? DefaultDarkGrey : c1;
+        }
+        else
+        {
+            c2 = _settings.UseSourceBackgroundColors
+                ? ColorLerp(DefaultDarkGrey, ParseOverlayColor(item.Color2Hex, DefaultDarkGrey), colorRetention)
+                : DefaultDarkGrey;
+        }
 
-                using Pen pen = new Pen(Color.FromArgb(70, 70, 70), 1);
-                g.DrawPath(pen, borderPath);
+        FillSlotBackground(g, slotRect, c1, c2);
+
+        int alpha = (int)Math.Clamp((1.0f - (distanceFromCenter / 2.2f)) * 215f * _wheelExpansion, 25f, 215f);
+        Color itemTextColor = Color.FromArgb(alpha, 235, 235, 235);
+
+        bool showName = _settings.OverlayIdentityMode == "Name" || _settings.OverlayIdentityMode == "Both";
+        bool showIcon = _settings.OverlayIdentityMode == "Icon" || _settings.OverlayIdentityMode == "Both";
+        float neighborScale = scale * 0.88f;
+
+        if (item.IsSingleSource)
+        {
+            RectangleF bounds = new RectangleF(24, slotRect.Y + slotRect.Height * 0.18f, slotRect.Width - 48, slotRect.Height * 0.64f);
+            DrawHeaderBadge(g, bounds, item.Label1, item.RawSource1, 1f, false, neighborScale, showName, showIcon, false, StringAlignment.Center, itemTextColor);
+        }
+        else
+        {
+            int centerX = (int)(slotRect.Width / 2f);
+            RectangleF leftB = new RectangleF(20, slotRect.Y + slotRect.Height * 0.18f, centerX - 32, slotRect.Height * 0.64f);
+            RectangleF rightB = new RectangleF(centerX + 12, slotRect.Y + slotRect.Height * 0.18f, centerX - 32, slotRect.Height * 0.64f);
+
+            DrawHeaderBadge(g, leftB, item.Label1, item.RawSource1, 1f, false, neighborScale, showName, showIcon, false, StringAlignment.Far, itemTextColor);
+            DrawHeaderBadge(g, rightB, item.Label2, item.RawSource2, 1f, false, neighborScale, showName, showIcon, false, StringAlignment.Near, itemTextColor);
+
+            using Pen divPen = new Pen(Color.FromArgb(alpha / 2, 220, 220, 220), 1.5f);
+            g.DrawLine(divPen, centerX, slotRect.Y + slotRect.Height * 0.25f, centerX, slotRect.Bottom - slotRect.Height * 0.25f);
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        if (this.ClientRectangle.Width <= 10 || this.ClientRectangle.Height <= 10) return;
+
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        int baseH = Math.Max(50, _settings.OverlayHeight);
+        float scale = Math.Clamp((float)baseH / 80f, 0.5f, 5.0f);
+        float centerY = (this.Height - baseH) / 2f;
+
+        using (SolidBrush baseBg = new SolidBrush(DefaultDarkGrey))
+        {
+            g.FillRectangle(baseBg, this.ClientRectangle);
+        }
+
+        // Render extended vertical cycle column when expanded (1.5 items above and 1.5 items below active slot)
+        if (_wheelExpansion > 0.01f && _cycleItems.Count > 0)
+        {
+            int count = _cycleItems.Count;
+            for (int offset = -2; offset <= 2; offset++)
+            {
+                if (offset == 0) continue;
+
+                int itemIdx = ((_cycleActiveIndex + offset) % count + count) % count;
+                float visualOffset = offset + _wheelScrollOffset;
+                float slotY = centerY + (visualOffset * baseH);
+                RectangleF slotRect = new RectangleF(0, slotY, this.Width, baseH);
+
+                DrawNeighborCycleSlot(g, slotRect, _cycleItems[itemIdx], Math.Abs(visualOffset), scale);
             }
         }
+
+        // Render active center HUD slot
+        float activeSlotY = centerY + (_wheelScrollOffset * baseH * 0.35f);
+        RectangleF activeRect = new RectangleF(0, activeSlotY, this.Width, baseH);
+        FillSlotBackground(g, activeRect, _renderedBgLeft, _renderedBgRight);
+        DrawActiveHUDContent(g, activeRect, scale);
+
+        // If the cycle wheel is expanded, draw crisp highlight borders around the active slot and smooth top/bottom vignette fades
+        if (_wheelExpansion > 0.02f)
+        {
+            int borderAlpha = (int)Math.Clamp(190 * _wheelExpansion, 0, 200);
+            using (Pen activeSlotPen = new Pen(Color.FromArgb(borderAlpha, 255, 255, 255), 1.5f))
+            {
+                g.DrawLine(activeSlotPen, 0, activeRect.Top, this.Width, activeRect.Top);
+                g.DrawLine(activeSlotPen, 0, activeRect.Bottom, this.Width, activeRect.Bottom);
+            }
+
+            int fadeHeight = Math.Max(16, (int)(baseH * 0.85f));
+            using (LinearGradientBrush topFade = new LinearGradientBrush(
+                new Rectangle(0, 0, this.Width, fadeHeight),
+                Color.FromArgb((int)(235 * _wheelExpansion), DefaultDarkGrey),
+                Color.FromArgb(0, DefaultDarkGrey),
+                LinearGradientMode.Vertical))
+            {
+                g.FillRectangle(topFade, 0, 0, this.Width, fadeHeight);
+            }
+
+            using (LinearGradientBrush bottomFade = new LinearGradientBrush(
+                new Rectangle(0, this.Height - fadeHeight, this.Width, fadeHeight),
+                Color.FromArgb(0, DefaultDarkGrey),
+                Color.FromArgb((int)(235 * _wheelExpansion), DefaultDarkGrey),
+                LinearGradientMode.Vertical))
+            {
+                g.FillRectangle(bottomFade, 0, this.Height - fadeHeight, this.Width, fadeHeight);
+            }
+        }
+
+        // Subtle outer border frame
+        using Pen borderPen = new Pen(Color.FromArgb(95, 255, 255, 255), 1);
+        g.DrawRectangle(borderPen, 0, 0, this.Width - 1, this.Height - 1);
     }
 
     private GraphicsPath? GetSafeRoundedBarPath(int x, int y, int width, int height, bool roundLeft, bool roundRight)

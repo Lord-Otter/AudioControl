@@ -36,7 +36,6 @@ static class Program
 public class ProgramGroup
 {
     public string GroupName { get; set; } = "";
-    public bool IsFavorite { get; set; } = false;
     public List<string> Executables { get; set; } = new List<string>();
 
     public ProgramGroup Clone()
@@ -44,28 +43,64 @@ public class ProgramGroup
         return new ProgramGroup
         {
             GroupName = this.GroupName,
-            IsFavorite = this.IsFavorite,
             Executables = new List<string>(this.Executables)
         };
     }
 }
 
-public class VolumeControlSlot
+public class VolumeCycleEntry
 {
     public string Source { get; set; } = "";
-    public int KeyUp { get; set; } = 0;
-    public int KeyDown { get; set; } = 0;
-    public int KeyMute { get; set; } = 0;
+    public string ColorHex { get; set; } = "#1B3B5A";
 
-    public VolumeControlSlot Clone()
+    public VolumeCycleEntry Clone()
     {
-        return new VolumeControlSlot
+        return new VolumeCycleEntry
         {
             Source = this.Source,
-            KeyUp = this.KeyUp,
-            KeyDown = this.KeyDown,
-            KeyMute = this.KeyMute
+            ColorHex = this.ColorHex
         };
+    }
+}
+
+public class CrossfadeCyclePair
+{
+    public string Source1 { get; set; } = "";
+    public string Color1Hex { get; set; } = "#1B3B5A";
+    public string Source2 { get; set; } = "";
+    public string Color2Hex { get; set; } = "#4A2040";
+
+    public CrossfadeCyclePair Clone()
+    {
+        return new CrossfadeCyclePair
+        {
+            Source1 = this.Source1,
+            Color1Hex = this.Color1Hex,
+            Source2 = this.Source2,
+            Color2Hex = this.Color2Hex
+        };
+    }
+}
+
+public readonly struct CycleDisplayItem
+{
+    public string Label1 { get; }
+    public string RawSource1 { get; }
+    public string Color1Hex { get; }
+    public string Label2 { get; }
+    public string RawSource2 { get; }
+    public string Color2Hex { get; }
+    public bool IsSingleSource { get; }
+
+    public CycleDisplayItem(string label1, string rawSource1, string color1Hex, string label2, string rawSource2, string color2Hex, bool isSingleSource)
+    {
+        Label1 = label1;
+        RawSource1 = rawSource1;
+        Color1Hex = color1Hex;
+        Label2 = label2;
+        RawSource2 = rawSource2;
+        Color2Hex = color2Hex;
+        IsSingleSource = isSingleSource;
     }
 }
 
@@ -420,9 +455,14 @@ public class AppSettings
 
     public string OperationMode { get; set; } = "Crossfade"; // "Crossfade" or "Volume Control"
     public string Source1 { get; set; } = "chrome.exe";
+    public string Source1Color { get; set; } = "#1B3B5A";
     public string Source2 { get; set; } = "firefox.exe";
+    public string Source2Color { get; set; } = "#4A2040";
+
     public List<ProgramGroup> Groups { get; set; } = new List<ProgramGroup>();
-    public List<VolumeControlSlot> AdditionalVolumeSlots { get; set; } = new List<VolumeControlSlot>();
+    public List<VolumeCycleEntry> VolumeCycleList { get; set; } = new List<VolumeCycleEntry>();
+    public List<CrossfadeCyclePair> CrossfadeCycleList { get; set; } = new List<CrossfadeCyclePair>();
+
     public List<string> RecentPrograms { get; set; } = new List<string> { "chrome.exe", "firefox.exe" };
     public Dictionary<string, string> KnownExecutablePaths { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     public bool RunOnStartup { get; set; } = false;
@@ -437,12 +477,23 @@ public class AppSettings
     public int VolKeyMute { get; set; } = 0x20;        // Space
     public int VolKeyDown { get; set; } = 0x28;        // Down Arrow
 
-    // Quick-Swap / Cycle Favorite Group Keybind (0 = unbound)
+    // Cycle Next / Previous Keybinds
     public int QuickSwapKey { get; set; } = 0;
+    public int CycleNextKey { get; set; } = 0;
+    public int CyclePrevKey { get; set; } = 0;
 
     // Personalization & Display Modes
     public string UnmutedColor { get; set; } = "#00A8FF";
     public string MutedColor { get; set; } = "#FF4757";
+    public bool UseSourceBackgroundColors { get; set; } = true;
+    public bool FadeBgColorWithVolume { get; set; } = true;
+    public string SingleSourceBgFillMode { get; set; } = "Solid Fill"; // "Solid Fill" or "Gradient to Dark Grey"
+    public bool KeepOverlayOnWhileSettingsOpen { get; set; } = false;
+
+    // Carousel Customization
+    public float CarouselVisibleNeighbors { get; set; } = 1.0f; // 0.5 to 2.5 items visible above & below stationary HUD
+    public bool CarouselBlendColors { get; set; } = true;       // Smoothly fade background colors between carousel items
+
     public string OverlayPosition { get; set; } = "Bottom Center";
     public int PopupDurationMs { get; set; } = 2500;
 
@@ -455,7 +506,8 @@ public class AppSettings
 
     public string OverlayIdentityMode { get; set; } = "Both"; // "Name", "Icon", "Both"
     public string OverlayLevelMode { get; set; } = "Both";    // "Bar", "Percentage", "Both"
-    public bool ShowIconsInSettings { get; set; } = true;
+
+    public int GetEffectiveCycleNextKey() => CycleNextKey != 0 ? CycleNextKey : QuickSwapKey;
 
     public AppSettings Clone()
     {
@@ -463,9 +515,12 @@ public class AppSettings
         {
             OperationMode = this.OperationMode,
             Source1 = this.Source1,
+            Source1Color = this.Source1Color,
             Source2 = this.Source2,
+            Source2Color = this.Source2Color,
             Groups = this.Groups.Select(g => g.Clone()).ToList(),
-            AdditionalVolumeSlots = this.AdditionalVolumeSlots.Select(s => s.Clone()).ToList(),
+            VolumeCycleList = this.VolumeCycleList.Select(v => v.Clone()).ToList(),
+            CrossfadeCycleList = this.CrossfadeCycleList.Select(c => c.Clone()).ToList(),
             RecentPrograms = new List<string>(this.RecentPrograms),
             KnownExecutablePaths = new Dictionary<string, string>(this.KnownExecutablePaths, StringComparer.OrdinalIgnoreCase),
             RunOnStartup = this.RunOnStartup,
@@ -476,8 +531,16 @@ public class AppSettings
             VolKeyMute = this.VolKeyMute,
             VolKeyDown = this.VolKeyDown,
             QuickSwapKey = this.QuickSwapKey,
+            CycleNextKey = this.CycleNextKey,
+            CyclePrevKey = this.CyclePrevKey,
             UnmutedColor = this.UnmutedColor,
             MutedColor = this.MutedColor,
+            UseSourceBackgroundColors = this.UseSourceBackgroundColors,
+            FadeBgColorWithVolume = this.FadeBgColorWithVolume,
+            SingleSourceBgFillMode = this.SingleSourceBgFillMode,
+            KeepOverlayOnWhileSettingsOpen = this.KeepOverlayOnWhileSettingsOpen,
+            CarouselVisibleNeighbors = this.CarouselVisibleNeighbors,
+            CarouselBlendColors = this.CarouselBlendColors,
             OverlayPosition = this.OverlayPosition,
             PopupDurationMs = this.PopupDurationMs,
             OverlayWidth = this.OverlayWidth,
@@ -487,8 +550,7 @@ public class AppSettings
             StepSize = this.StepSize,
             EnableEqualizationBuffer = this.EnableEqualizationBuffer,
             OverlayIdentityMode = this.OverlayIdentityMode,
-            OverlayLevelMode = this.OverlayLevelMode,
-            ShowIconsInSettings = this.ShowIconsInSettings
+            OverlayLevelMode = this.OverlayLevelMode
         };
     }
 
@@ -723,94 +785,103 @@ public class AudioCrossfaderWorker
     private const int VK_CONTROL = 0x11;
     private const int VK_MENU = 0x12;
 
-    // Guarantees 1 step per physical key press or rotary encoder notch
-    private struct KeyPressTracker
+    // Conflict-free key tracker: works with shared base keys (e.g. F18 for Volume Up and Alt+F18 for Cycle Next)
+    private struct KeyBindingState
     {
-        public int PollSteps(int vk, bool modifiersMatch)
+        public bool WasComboActive;
+        public bool WasPhysicalKeyDown;
+        public DateTime NextRepeatTime;
+
+        public int PollSteps(short keyState, bool modifiersMatch, bool allowHoldRepeat)
         {
-            if (vk == 0 || !modifiersMatch) return 0;
+            bool isPhysicalDown = (keyState & 0x8000) != 0;
+            bool hadTransition = (keyState & 0x0001) != 0;
+
+            // Catch ultra-brief encoder pulses (<2ms) that went down and up between ticks,
+            // but ONLY if the key wasn't already held down from a different modifier combo.
+            bool microPulse = !isPhysicalDown && !WasPhysicalKeyDown && hadTransition;
+            bool isComboActive = (isPhysicalDown || microPulse) && modifiersMatch;
 
             int steps = 0;
-            while ((GetAsyncKeyState(vk) & 0x0001) != 0)
+            var now = DateTime.UtcNow;
+
+            if (isComboActive)
             {
-                steps++;
+                // Trigger only on a fresh press of the physical key while modifiers match
+                if (!WasComboActive && !WasPhysicalKeyDown)
+                {
+                    steps = 1;
+                    NextRepeatTime = now.AddMilliseconds(400);
+                }
+                else if (allowHoldRepeat && WasComboActive && isPhysicalDown && now >= NextRepeatTime)
+                {
+                    steps = 1;
+                    NextRepeatTime = now.AddMilliseconds(55);
+                }
             }
+
+            WasComboActive = isComboActive && isPhysicalDown;
+            WasPhysicalKeyDown = isPhysicalDown;
             return steps;
         }
     }
 
-    private class RuntimeVolChannel
-    {
-        public string Source = "";
-        public int KeyUp;
-        public int KeyDown;
-        public int KeyMute;
-        public float TargetVol = 1.0f;
-        public float VisualVol = 1.0f;
-        public bool IsMuted = false;
-        public bool LastMuteDown = false;
-        public KeyPressTracker UpTracker;
-        public KeyPressTracker DownTracker;
-    }
-
     private AppSettings _settings;
     private readonly Action<AppSettings>? _onRuntimeSettingsMutated;
+
+    // Crossfade State
     private float _targetPosition = 0.5f;
     private float _visualPosition = 0.5f;
     private int _muteState = 0;
     private int _detentClicks = 0;
     private int _detentDirection = 0;
 
-    private List<RuntimeVolChannel> _volChannels = new();
-    private int _activeVolChannelIndex = 0;
+    // Volume Control State
+    private float _volTarget = 1.0f;
+    private float _volVisual = 1.0f;
+    private bool _volMuted = false;
+
+    private int _volCycleIndex = -1;
+    private int _cfCycleIndex = -1;
 
     private VolumeOverlayForm? _overlay;
     private Thread? _workerThread;
     private CancellationTokenSource? _cts;
     private readonly object _stateLock = new();
     private volatile bool _forceResetAudioFlag = false;
+    private volatile bool _settingsWindowOpen = false;
+    private volatile bool _previewRequestedFlag = false;
+    private AppSettings? _pendingPreviewSettings = null;
 
     public AudioCrossfaderWorker(AppSettings settings, Action<AppSettings>? onRuntimeSettingsMutated = null)
     {
         _settings = settings.Clone();
         _onRuntimeSettingsMutated = onRuntimeSettingsMutated;
         AppIconCache.LoadPathsFromSettings(_settings);
-        RebuildVolumeChannels();
+        SyncCycleIndices();
     }
 
-    private void RebuildVolumeChannels()
+    private void SyncCycleIndices()
     {
-        var newList = new List<RuntimeVolChannel>
-        {
-            new RuntimeVolChannel
-            {
-                Source = _settings.Source1,
-                KeyUp = _settings.VolKeyUp,
-                KeyDown = _settings.VolKeyDown,
-                KeyMute = _settings.VolKeyMute,
-                TargetVol = 1.0f,
-                VisualVol = 1.0f
-            }
-        };
+        _volCycleIndex = _settings.VolumeCycleList.FindIndex(v =>
+            !string.IsNullOrWhiteSpace(v.Source) &&
+            AppSettings.NormalizeExeName(v.Source).Equals(AppSettings.NormalizeExeName(_settings.Source1), StringComparison.OrdinalIgnoreCase));
 
-        foreach (var slot in _settings.AdditionalVolumeSlots)
+        if (_volCycleIndex >= 0)
         {
-            if (!string.IsNullOrWhiteSpace(slot.Source))
-            {
-                newList.Add(new RuntimeVolChannel
-                {
-                    Source = slot.Source,
-                    KeyUp = slot.KeyUp,
-                    KeyDown = slot.KeyDown,
-                    KeyMute = slot.KeyMute,
-                    TargetVol = 1.0f,
-                    VisualVol = 1.0f
-                });
-            }
+            _settings.Source1Color = _settings.VolumeCycleList[_volCycleIndex].ColorHex;
         }
 
-        _volChannels = newList;
-        _activeVolChannelIndex = 0;
+        _cfCycleIndex = _settings.CrossfadeCycleList.FindIndex(c =>
+            !string.IsNullOrWhiteSpace(c.Source1) && !string.IsNullOrWhiteSpace(c.Source2) &&
+            AppSettings.NormalizeExeName(c.Source1).Equals(AppSettings.NormalizeExeName(_settings.Source1), StringComparison.OrdinalIgnoreCase) &&
+            AppSettings.NormalizeExeName(c.Source2).Equals(AppSettings.NormalizeExeName(_settings.Source2), StringComparison.OrdinalIgnoreCase));
+
+        if (_cfCycleIndex >= 0)
+        {
+            _settings.Source1Color = _settings.CrossfadeCycleList[_cfCycleIndex].Color1Hex;
+            _settings.Source2Color = _settings.CrossfadeCycleList[_cfCycleIndex].Color2Hex;
+        }
     }
 
     public void Start()
@@ -858,26 +929,48 @@ public class AudioCrossfaderWorker
 
     public void UpdateSettings(AppSettings newSettings, bool resetVolumes)
     {
-        // 1. Stop and wait for the old worker thread to finish cleanup on old sources first
         Stop();
 
-        // 2. Apply new settings and reset mute state so the mute cycle always starts cleanly
         lock (_stateLock)
         {
             _settings = newSettings.Clone();
             AppIconCache.LoadPathsFromSettings(_settings);
-            RebuildVolumeChannels();
+            SyncCycleIndices();
             _muteState = 0;
+            _volMuted = false;
 
             if (resetVolumes)
             {
                 _targetPosition = 0.5f;
                 _visualPosition = 0.5f;
+                _volTarget = 1.0f;
+                _volVisual = 1.0f;
             }
         }
 
-        // 3. Start a single clean worker thread
         Start();
+    }
+
+    public void SetSettingsWindowOpen(bool isOpen, AppSettings? liveDraft = null)
+    {
+        _settingsWindowOpen = isOpen;
+        if (liveDraft != null)
+        {
+            lock (_stateLock)
+            {
+                _pendingPreviewSettings = liveDraft.Clone();
+            }
+        }
+        _previewRequestedFlag = true;
+    }
+
+    public void PreviewOverlay(AppSettings draftSettings)
+    {
+        lock (_stateLock)
+        {
+            _pendingPreviewSettings = draftSettings.Clone();
+        }
+        _previewRequestedFlag = true;
     }
 
     public void ResetVolumesToFullAndCenter()
@@ -887,12 +980,9 @@ public class AudioCrossfaderWorker
             _targetPosition = 0.5f;
             _visualPosition = 0.5f;
             _muteState = 0;
-            foreach (var ch in _volChannels)
-            {
-                ch.TargetVol = 1.0f;
-                ch.VisualVol = 1.0f;
-                ch.IsMuted = false;
-            }
+            _volTarget = 1.0f;
+            _volVisual = 1.0f;
+            _volMuted = false;
         }
         _forceResetAudioFlag = true;
     }
@@ -904,7 +994,7 @@ public class AudioCrossfaderWorker
                KeybindHelper.HasShift(binding) == shiftDown;
     }
 
-    private static string GetResolvedLabel(string sourceTarget)
+    public static string GetResolvedLabel(string sourceTarget)
     {
         if (string.IsNullOrEmpty(sourceTarget)) return "";
         if (sourceTarget.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase))
@@ -921,81 +1011,195 @@ public class AudioCrossfaderWorker
             sessionCache.SetVolumeForProcessKey(AppSettings.NormalizeProcessKey(exe), 1.0f);
         foreach (var exe in _settings.ResolveExecutables(_settings.Source2))
             sessionCache.SetVolumeForProcessKey(AppSettings.NormalizeProcessKey(exe), 1.0f);
-        foreach (var slot in _settings.AdditionalVolumeSlots)
+
+        foreach (var entry in _settings.VolumeCycleList)
         {
-            foreach (var exe in _settings.ResolveExecutables(slot.Source))
+            foreach (var exe in _settings.ResolveExecutables(entry.Source))
+                sessionCache.SetVolumeForProcessKey(AppSettings.NormalizeProcessKey(exe), 1.0f);
+        }
+
+        foreach (var pair in _settings.CrossfadeCycleList)
+        {
+            foreach (var exe in _settings.ResolveExecutables(pair.Source1))
+                sessionCache.SetVolumeForProcessKey(AppSettings.NormalizeProcessKey(exe), 1.0f);
+            foreach (var exe in _settings.ResolveExecutables(pair.Source2))
                 sessionCache.SetVolumeForProcessKey(AppSettings.NormalizeProcessKey(exe), 1.0f);
         }
     }
 
-    private void PerformQuickSwapOrCycle(AudioSessionCache sessionCache)
+    private (List<CycleDisplayItem> items, int activeIndex) PerformCycleStep(AudioSessionCache sessionCache, int direction)
     {
+        List<CycleDisplayItem> displayItems = new List<CycleDisplayItem>();
+        int newActiveIdx = 0;
+
         lock (_stateLock)
         {
             ResetAllConfiguredExecutables(sessionCache);
-
-            var favGroups = _settings.Groups
-                .Where(g => g.IsFavorite && !string.IsNullOrWhiteSpace(g.GroupName))
-                .Select(g => $"Group: {g.GroupName}")
-                .ToList();
 
             bool isVolMode = (_settings.OperationMode == "Volume Control");
 
             if (isVolMode)
             {
-                if (favGroups.Count > 0 && _volChannels.Count > 0)
-                {
-                    string current = _volChannels[0].Source;
-                    int idx = favGroups.FindIndex(g => g.Equals(current, StringComparison.OrdinalIgnoreCase));
-                    string nextFav = favGroups[(idx + 1) % favGroups.Count];
-                    _volChannels[0].Source = nextFav;
-                    _settings.Source1 = nextFav;
-                    _activeVolChannelIndex = 0;
-                    _onRuntimeSettingsMutated?.Invoke(_settings.Clone());
-                }
-                else if (_volChannels.Count > 1)
-                {
-                    _activeVolChannelIndex = (_activeVolChannelIndex + 1) % _volChannels.Count;
-                }
-            }
-            else
-            {
-                if (favGroups.Count >= 2)
-                {
-                    int idx = favGroups.FindIndex(g => g.Equals(_settings.Source1, StringComparison.OrdinalIgnoreCase));
-                    for (int offset = 1; offset <= favGroups.Count; offset++)
+                var validEntries = _settings.VolumeCycleList
+                    .Where(v => !string.IsNullOrWhiteSpace(v.Source))
+                    .Select(v => new VolumeCycleEntry
                     {
-                        string candidate = favGroups[(idx + offset + favGroups.Count) % favGroups.Count];
-                        if (!candidate.Equals(_settings.Source2, StringComparison.OrdinalIgnoreCase) &&
-                            _settings.GetOverlappingExecutables(candidate, _settings.Source2).Count == 0)
-                        {
-                            _settings.Source1 = candidate;
-                            break;
-                        }
+                        Source = v.Source.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase)
+                            ? v.Source.Trim()
+                            : AppSettings.NormalizeExeName(v.Source),
+                        ColorHex = v.ColorHex
+                    })
+                    .ToList();
+
+                if (validEntries.Count > 0)
+                {
+                    string normCurrent = _settings.Source1.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase)
+                        ? _settings.Source1.Trim()
+                        : AppSettings.NormalizeExeName(_settings.Source1);
+
+                    int currentIdx = validEntries.FindIndex(v =>
+                        v.Source.Equals(normCurrent, StringComparison.OrdinalIgnoreCase) &&
+                        v.ColorHex.Equals(_settings.Source1Color, StringComparison.OrdinalIgnoreCase));
+
+                    if (currentIdx < 0)
+                    {
+                        currentIdx = validEntries.FindIndex(v =>
+                            v.Source.Equals(normCurrent, StringComparison.OrdinalIgnoreCase));
                     }
-                    _onRuntimeSettingsMutated?.Invoke(_settings.Clone());
-                }
-                else if (favGroups.Count == 1)
-                {
-                    string fav = favGroups[0];
-                    if (!_settings.Source1.Equals(fav, StringComparison.OrdinalIgnoreCase) &&
-                        !_settings.Source2.Equals(fav, StringComparison.OrdinalIgnoreCase))
+
+                    if (currentIdx < 0)
                     {
-                        _settings.Source1 = fav;
+                        newActiveIdx = direction >= 0 ? 0 : validEntries.Count - 1;
                     }
                     else
                     {
-                        (_settings.Source1, _settings.Source2) = (_settings.Source2, _settings.Source1);
+                        newActiveIdx = ((currentIdx + direction) % validEntries.Count + validEntries.Count) % validEntries.Count;
                     }
+
+                    var nextEntry = validEntries[newActiveIdx];
+                    _settings.Source1 = nextEntry.Source;
+                    _settings.Source1Color = nextEntry.ColorHex;
+                    _volCycleIndex = newActiveIdx;
+                    _volMuted = false;
+
+                    foreach (var v in validEntries)
+                    {
+                        displayItems.Add(new CycleDisplayItem(
+                            GetResolvedLabel(v.Source),
+                            v.Source,
+                            v.ColorHex,
+                            "",
+                            "",
+                            "",
+                            true));
+                    }
+
                     _onRuntimeSettingsMutated?.Invoke(_settings.Clone());
                 }
                 else
                 {
+                    displayItems.Add(new CycleDisplayItem(
+                        GetResolvedLabel(_settings.Source1),
+                        _settings.Source1,
+                        _settings.Source1Color,
+                        "",
+                        "",
+                        "",
+                        true));
+                }
+            }
+            else
+            {
+                var validPairs = _settings.CrossfadeCycleList
+                    .Where(p => !string.IsNullOrWhiteSpace(p.Source1) && !string.IsNullOrWhiteSpace(p.Source2))
+                    .Select(p => new CrossfadeCyclePair
+                    {
+                        Source1 = p.Source1.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase)
+                            ? p.Source1.Trim()
+                            : AppSettings.NormalizeExeName(p.Source1),
+                        Color1Hex = p.Color1Hex,
+                        Source2 = p.Source2.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase)
+                            ? p.Source2.Trim()
+                            : AppSettings.NormalizeExeName(p.Source2),
+                        Color2Hex = p.Color2Hex
+                    })
+                    .ToList();
+
+                if (validPairs.Count > 0)
+                {
+                    string normS1 = _settings.Source1.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase)
+                        ? _settings.Source1.Trim()
+                        : AppSettings.NormalizeExeName(_settings.Source1);
+                    string normS2 = _settings.Source2.StartsWith("Group: ", StringComparison.OrdinalIgnoreCase)
+                        ? _settings.Source2.Trim()
+                        : AppSettings.NormalizeExeName(_settings.Source2);
+
+                    int currentIdx = validPairs.FindIndex(p =>
+                        p.Source1.Equals(normS1, StringComparison.OrdinalIgnoreCase) &&
+                        p.Source2.Equals(normS2, StringComparison.OrdinalIgnoreCase));
+
+                    if (currentIdx < 0)
+                    {
+                        newActiveIdx = direction >= 0 ? 0 : validPairs.Count - 1;
+                    }
+                    else
+                    {
+                        newActiveIdx = ((currentIdx + direction) % validPairs.Count + validPairs.Count) % validPairs.Count;
+                    }
+
+                    var nextPair = validPairs[newActiveIdx];
+                    _settings.Source1 = nextPair.Source1;
+                    _settings.Source1Color = nextPair.Color1Hex;
+                    _settings.Source2 = nextPair.Source2;
+                    _settings.Source2Color = nextPair.Color2Hex;
+                    _cfCycleIndex = newActiveIdx;
+                    _muteState = 0;
+
+                    foreach (var p in validPairs)
+                    {
+                        displayItems.Add(new CycleDisplayItem(
+                            GetResolvedLabel(p.Source1),
+                            p.Source1,
+                            p.Color1Hex,
+                            GetResolvedLabel(p.Source2),
+                            p.Source2,
+                            p.Color2Hex,
+                            false));
+                    }
+
+                    _onRuntimeSettingsMutated?.Invoke(_settings.Clone());
+                }
+                else
+                {
+                    // Fallback if no cycle pairs are configured: swap Source 1 and Source 2
                     (_settings.Source1, _settings.Source2) = (_settings.Source2, _settings.Source1);
+                    (_settings.Source1Color, _settings.Source2Color) = (_settings.Source2Color, _settings.Source1Color);
+
+                    displayItems.Add(new CycleDisplayItem(
+                        GetResolvedLabel(_settings.Source1),
+                        _settings.Source1,
+                        _settings.Source1Color,
+                        GetResolvedLabel(_settings.Source2),
+                        _settings.Source2,
+                        _settings.Source2Color,
+                        false));
+
+                    displayItems.Add(new CycleDisplayItem(
+                        GetResolvedLabel(_settings.Source2),
+                        _settings.Source2,
+                        _settings.Source2Color,
+                        GetResolvedLabel(_settings.Source1),
+                        _settings.Source1,
+                        _settings.Source1Color,
+                        false));
+
+                    newActiveIdx = 0;
                     _onRuntimeSettingsMutated?.Invoke(_settings.Clone());
                 }
             }
         }
+
+        return (displayItems, newActiveIdx);
     }
 
     private void RunLoop(CancellationToken token)
@@ -1021,12 +1225,27 @@ public class AudioCrossfaderWorker
 
         DateTime lastAudioApplyTime = DateTime.MinValue;
         DateTime lastVisualPushTime = DateTime.MinValue;
-        bool lastCrossfadeMuteDown = false;
-        bool lastQuickSwapDown = false;
         bool audioUpdatePending = false;
 
-        KeyPressTracker cfUpTracker = default;
-        KeyPressTracker cfDownTracker = default;
+        KeyBindingState upTracker = default;
+        KeyBindingState downTracker = default;
+        KeyBindingState muteTracker = default;
+        KeyBindingState nextTracker = default;
+        KeyBindingState prevTracker = default;
+
+        // Per-tick cache so GetAsyncKeyState is only called ONCE per unique virtual key
+        Dictionary<int, short> keySnapshot = new Dictionary<int, short>(8);
+
+        short SampleKeyOnce(int vk)
+        {
+            if (vk == 0) return 0;
+            if (!keySnapshot.TryGetValue(vk, out short state))
+            {
+                state = GetAsyncKeyState(vk);
+                keySnapshot[vk] = state;
+            }
+            return state;
+        }
 
         while (!token.IsCancellationRequested)
         {
@@ -1035,6 +1254,20 @@ public class AudioCrossfaderWorker
                 _forceResetAudioFlag = false;
                 ResetAllConfiguredExecutables(sessionCache);
                 ApplyVolumes(sessionCache, true, true);
+            }
+
+            if (_previewRequestedFlag)
+            {
+                _previewRequestedFlag = false;
+                AppSettings? previewCfg = null;
+                lock (_stateLock)
+                {
+                    previewCfg = _pendingPreviewSettings?.Clone();
+                }
+
+                bool pinned = _settingsWindowOpen && (previewCfg?.KeepOverlayOnWhileSettingsOpen ?? _settings.KeepOverlayOnWhileSettingsOpen);
+                _overlay?.ApplyLivePreviewSettings(previewCfg ?? _settings, pinned, forcePopup: true);
+                ApplyVolumes(sessionCache, false, true);
             }
 
             bool physicalInputRegistered = false;
@@ -1046,20 +1279,32 @@ public class AudioCrossfaderWorker
                 _detentDirection = 0;
             }
 
+            keySnapshot.Clear();
             bool ctrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             bool altDown = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
             bool shiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 
-            int swapBinding = _settings.QuickSwapKey;
-            int swapVk = KeybindHelper.GetPrimaryVk(swapBinding);
-            bool swapDown = swapVk != 0 && (GetAsyncKeyState(swapVk) & 0x8000) != 0 && ModifiersMatch(swapBinding, ctrlDown, altDown, shiftDown);
-            if (swapDown && !lastQuickSwapDown)
+            int nextBinding = _settings.GetEffectiveCycleNextKey();
+            int nextVk = KeybindHelper.GetPrimaryVk(nextBinding);
+            bool nextModsOk = ModifiersMatch(nextBinding, ctrlDown, altDown, shiftDown);
+            if (nextTracker.PollSteps(SampleKeyOnce(nextVk), nextModsOk, allowHoldRepeat: false) > 0)
             {
-                PerformQuickSwapOrCycle(sessionCache);
+                var (cycleItems, activeIdx) = PerformCycleStep(sessionCache, +1);
+                _overlay?.TriggerCycleWheel(cycleItems, activeIdx, +1);
                 physicalInputRegistered = true;
                 immediateAudioUpdate = true;
             }
-            lastQuickSwapDown = swapDown;
+
+            int prevBinding = _settings.CyclePrevKey;
+            int prevVk = KeybindHelper.GetPrimaryVk(prevBinding);
+            bool prevModsOk = ModifiersMatch(prevBinding, ctrlDown, altDown, shiftDown);
+            if (prevTracker.PollSteps(SampleKeyOnce(prevVk), prevModsOk, allowHoldRepeat: false) > 0)
+            {
+                var (cycleItems, activeIdx) = PerformCycleStep(sessionCache, -1);
+                _overlay?.TriggerCycleWheel(cycleItems, activeIdx, -1);
+                physicalInputRegistered = true;
+                immediateAudioUpdate = true;
+            }
 
             bool isVolMode = (_settings.OperationMode == "Volume Control");
             float stepIncrement = (Math.Clamp(_settings.StepSize, 1, 100) / 2.0f) / 100.0f;
@@ -1075,60 +1320,54 @@ public class AudioCrossfaderWorker
 
                 lock (_stateLock)
                 {
-                    for (int i = 0; i < _volChannels.Count; i++)
+                    int upVk = KeybindHelper.GetPrimaryVk(_settings.VolKeyUp);
+                    int downVk = KeybindHelper.GetPrimaryVk(_settings.VolKeyDown);
+                    int muteVk = KeybindHelper.GetPrimaryVk(_settings.VolKeyMute);
+
+                    bool upModsOk = ModifiersMatch(_settings.VolKeyUp, ctrlDown, altDown, shiftDown);
+                    bool downModsOk = ModifiersMatch(_settings.VolKeyDown, ctrlDown, altDown, shiftDown);
+                    bool muteModsOk = ModifiersMatch(_settings.VolKeyMute, ctrlDown, altDown, shiftDown);
+
+                    int upSteps = upTracker.PollSteps(SampleKeyOnce(upVk), upModsOk, allowHoldRepeat: true);
+                    int downSteps = downTracker.PollSteps(SampleKeyOnce(downVk), downModsOk, allowHoldRepeat: true);
+                    int muteSteps = muteTracker.PollSteps(SampleKeyOnce(muteVk), muteModsOk, allowHoldRepeat: false);
+
+                    if (muteSteps > 0)
                     {
-                        var ch = _volChannels[i];
-                        int upVk = KeybindHelper.GetPrimaryVk(ch.KeyUp);
-                        int downVk = KeybindHelper.GetPrimaryVk(ch.KeyDown);
-                        int muteVk = KeybindHelper.GetPrimaryVk(ch.KeyMute);
+                        _volMuted = !_volMuted;
+                        physicalInputRegistered = true;
+                        immediateAudioUpdate = true;
+                    }
 
-                        bool upModsOk = ModifiersMatch(ch.KeyUp, ctrlDown, altDown, shiftDown);
-                        bool downModsOk = ModifiersMatch(ch.KeyDown, ctrlDown, altDown, shiftDown);
-                        bool muteModsOk = ModifiersMatch(ch.KeyMute, ctrlDown, altDown, shiftDown);
+                    if (upSteps > 0)
+                    {
+                        _volTarget = Math.Clamp(_volTarget + volDeltaPerStep * upSteps, 0.0f, 1.0f);
+                        if (_volTarget >= 1.0f - (volDeltaPerStep * 0.45f)) _volTarget = 1.0f;
+                        physicalInputRegistered = true;
+                    }
+                    if (downSteps > 0)
+                    {
+                        _volTarget = Math.Clamp(_volTarget - volDeltaPerStep * downSteps, 0.0f, 1.0f);
+                        if (_volTarget <= (volDeltaPerStep * 0.45f)) _volTarget = 0.0f;
+                        physicalInputRegistered = true;
+                    }
 
-                        int upSteps = ch.UpTracker.PollSteps(upVk, upModsOk);
-                        int downSteps = ch.DownTracker.PollSteps(downVk, downModsOk);
-
-                        bool muteDown = muteVk != 0 && (GetAsyncKeyState(muteVk) & 0x8000) != 0 && muteModsOk;
-                        if (muteDown && !ch.LastMuteDown)
+                    if (_settings.EnableInterpolation)
+                    {
+                        float diff = _volTarget - _volVisual;
+                        if (Math.Abs(diff) > 0.002f)
                         {
-                            ch.IsMuted = !ch.IsMuted;
-                            _activeVolChannelIndex = i;
-                            physicalInputRegistered = true;
-                            immediateAudioUpdate = true;
-                        }
-                        ch.LastMuteDown = muteDown;
-
-                        if (upSteps > 0)
-                        {
-                            ch.TargetVol = Math.Clamp(ch.TargetVol + volDeltaPerStep * upSteps, 0.0f, 1.0f);
-                            _activeVolChannelIndex = i;
-                            physicalInputRegistered = true;
-                        }
-                        if (downSteps > 0)
-                        {
-                            ch.TargetVol = Math.Clamp(ch.TargetVol - volDeltaPerStep * downSteps, 0.0f, 1.0f);
-                            _activeVolChannelIndex = i;
-                            physicalInputRegistered = true;
-                        }
-
-                        if (_settings.EnableInterpolation)
-                        {
-                            float diff = ch.TargetVol - ch.VisualVol;
-                            if (Math.Abs(diff) > 0.001f)
-                            {
-                                if (frameTickReady) ch.VisualVol += diff * lerpFactor;
-                                isAnimating = true;
-                            }
-                            else
-                            {
-                                ch.VisualVol = ch.TargetVol;
-                            }
+                            if (frameTickReady) _volVisual += diff * lerpFactor;
+                            isAnimating = true;
                         }
                         else
                         {
-                            ch.VisualVol = ch.TargetVol;
+                            _volVisual = _volTarget;
                         }
+                    }
+                    else
+                    {
+                        _volVisual = _volTarget;
                     }
                 }
             }
@@ -1146,13 +1385,12 @@ public class AudioCrossfaderWorker
                 bool downModsOk = ModifiersMatch(activeKeyDown, ctrlDown, altDown, shiftDown);
                 bool muteModsOk = ModifiersMatch(activeKeyMute, ctrlDown, altDown, shiftDown);
 
-                int upSteps = cfUpTracker.PollSteps(upVk, upModsOk);
-                int downSteps = cfDownTracker.PollSteps(downVk, downModsOk);
+                int upSteps = upTracker.PollSteps(SampleKeyOnce(upVk), upModsOk, allowHoldRepeat: true);
+                int downSteps = downTracker.PollSteps(SampleKeyOnce(downVk), downModsOk, allowHoldRepeat: true);
+                int muteSteps = muteTracker.PollSteps(SampleKeyOnce(muteVk), muteModsOk, allowHoldRepeat: false);
 
-                bool currentMuteComboDown = muteVk != 0 && (GetAsyncKeyState(muteVk) & 0x8000) != 0 && muteModsOk;
-                if (currentMuteComboDown && !lastCrossfadeMuteDown)
+                if (muteSteps > 0)
                 {
-                    // Cycle order: State 1 (Source 2 Muted) -> State 2 (Source 1 Muted) -> State 0 (Unmuted)
                     _muteState = _muteState switch
                     {
                         1 => 2,
@@ -1162,7 +1400,6 @@ public class AudioCrossfaderWorker
                     physicalInputRegistered = true;
                     immediateAudioUpdate = true;
                 }
-                lastCrossfadeMuteDown = currentMuteComboDown;
 
                 if (upSteps > 0)
                 {
@@ -1178,7 +1415,7 @@ public class AudioCrossfaderWorker
                 if (_settings.EnableInterpolation)
                 {
                     float diff = _targetPosition - _visualPosition;
-                    if (Math.Abs(diff) > 0.0005f)
+                    if (Math.Abs(diff) > 0.001f)
                     {
                         if (frameTickReady) _visualPosition += diff * lerpFactor;
                         isAnimating = true;
@@ -1202,7 +1439,6 @@ public class AudioCrossfaderWorker
                 audioUpdatePending = true;
             }
 
-            // Never drop a pending audio update; apply immediately on mute/swap or once 12ms have elapsed
             bool shouldUpdateAudio = audioUpdatePending && (immediateAudioUpdate || (now - lastAudioApplyTime).TotalMilliseconds >= 12);
             if (shouldUpdateAudio)
             {
@@ -1286,40 +1522,42 @@ public class AudioCrossfaderWorker
 
     private void ApplyVolumes(AudioSessionCache sessionCache, bool updateAudioSessions, bool forceShowPopup)
     {
-        bool isVolumeControl = (_settings.OperationMode == "Volume Control");
+        AppSettings effectiveSettings;
+        lock (_stateLock)
+        {
+            effectiveSettings = (_settingsWindowOpen && _pendingPreviewSettings != null)
+                ? _pendingPreviewSettings
+                : _settings;
+        }
+
+        bool isVolumeControl = (effectiveSettings.OperationMode == "Volume Control");
 
         if (isVolumeControl)
         {
-            string activeLabel = "";
-            string activeRawSource = "";
-            float activeVisVol = 1.0f;
-            int activeMuteState = 0;
+            string activeLabel;
+            string activeRawSource;
+            string activeColor1;
+            float activeVisVol;
+            int activeMuteState;
 
             lock (_stateLock)
             {
+                activeRawSource = effectiveSettings.Source1;
+                activeColor1 = effectiveSettings.Source1Color;
+                activeLabel = GetResolvedLabel(activeRawSource);
+                activeVisVol = Math.Clamp(_volVisual, 0.0f, 1.0f);
+                activeMuteState = _volMuted ? 1 : 0;
+
                 if (updateAudioSessions)
                 {
-                    foreach (var ch in _volChannels)
+                    float outVol = _volMuted ? 0.0f : _volTarget;
+                    if (outVol <= 0.01f) outVol = 0.0f;
+                    if (outVol >= 0.99f) outVol = 1.0f;
+
+                    foreach (var exe in _settings.ResolveExecutables(_settings.Source1))
                     {
-                        float outVol = ch.IsMuted ? 0.0f : ch.TargetVol;
-                        if (outVol <= 0.01f) outVol = 0.0f;
-                        if (outVol >= 0.99f) outVol = 1.0f;
-
-                        foreach (var exe in _settings.ResolveExecutables(ch.Source))
-                        {
-                            sessionCache.SetVolumeForProcessKey(AppSettings.NormalizeProcessKey(exe), outVol);
-                        }
+                        sessionCache.SetVolumeForProcessKey(AppSettings.NormalizeProcessKey(exe), outVol);
                     }
-                }
-
-                if (_volChannels.Count > 0)
-                {
-                    int idx = Math.Clamp(_activeVolChannelIndex, 0, _volChannels.Count - 1);
-                    var activeCh = _volChannels[idx];
-                    activeRawSource = activeCh.Source;
-                    activeLabel = GetResolvedLabel(activeCh.Source);
-                    activeVisVol = Math.Clamp(activeCh.VisualVol, 0.0f, 1.0f);
-                    activeMuteState = activeCh.IsMuted ? 1 : 0;
                 }
             }
 
@@ -1328,6 +1566,8 @@ public class AudioCrossfaderWorker
                 activeLabel,
                 "",
                 activeRawSource,
+                "",
+                activeColor1,
                 "",
                 activeVisVol,
                 0.0f,
@@ -1350,26 +1590,36 @@ public class AudioCrossfaderWorker
             float actualApp1Vol = (_muteState == 2) ? 0.0f : audioApp1Vol;
             float actualApp2Vol = (_muteState == 1) ? 0.0f : audioApp2Vol;
 
-            string s1 = _settings.Source1;
-            string s2 = _settings.Source2;
+            string s1;
+            string s2;
+            string c1;
+            string c2;
 
-            if (updateAudioSessions)
+            lock (_stateLock)
             {
-                var source1Targets = _settings.ResolveExecutables(s1);
-                var source1Keys = new HashSet<string>(source1Targets.Select(AppSettings.NormalizeProcessKey), StringComparer.OrdinalIgnoreCase);
+                s1 = effectiveSettings.Source1;
+                s2 = effectiveSettings.Source2;
+                c1 = effectiveSettings.Source1Color;
+                c2 = effectiveSettings.Source2Color;
 
-                foreach (var exe in source1Targets)
+                if (updateAudioSessions)
                 {
-                    sessionCache.SetVolumeForProcessKey(AppSettings.NormalizeProcessKey(exe), actualApp1Vol);
-                }
+                    var source1Targets = _settings.ResolveExecutables(_settings.Source1);
+                    var source1Keys = new HashSet<string>(source1Targets.Select(AppSettings.NormalizeProcessKey), StringComparer.OrdinalIgnoreCase);
 
-                var source2Targets = _settings.ResolveExecutables(s2);
-                foreach (var exe in source2Targets)
-                {
-                    string key = AppSettings.NormalizeProcessKey(exe);
-                    if (!source1Keys.Contains(key))
+                    foreach (var exe in source1Targets)
                     {
-                        sessionCache.SetVolumeForProcessKey(key, actualApp2Vol);
+                        sessionCache.SetVolumeForProcessKey(AppSettings.NormalizeProcessKey(exe), actualApp1Vol);
+                    }
+
+                    var source2Targets = _settings.ResolveExecutables(_settings.Source2);
+                    foreach (var exe in source2Targets)
+                    {
+                        string key = AppSettings.NormalizeProcessKey(exe);
+                        if (!source1Keys.Contains(key))
+                        {
+                            sessionCache.SetVolumeForProcessKey(key, actualApp2Vol);
+                        }
                     }
                 }
             }
@@ -1386,6 +1636,8 @@ public class AudioCrossfaderWorker
                 GetResolvedLabel(s2),
                 s1,
                 s2,
+                c1,
+                c2,
                 visualApp1Vol,
                 visualApp2Vol,
                 _muteState,
